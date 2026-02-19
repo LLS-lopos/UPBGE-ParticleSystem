@@ -57,9 +57,15 @@ def update_wire_shape(self, context):
         # Link to collection
         context.collection.objects.link(wire_obj)
         
-        # Parent to emitter (follows emitter position/rotation)
+        # Parent to emitter - reset local transform so wire sits exactly at emitter center.
+        # Using matrix_world.inverted() here would bake the emitter's current world offset
+        # into the parent inverse, causing the wire to drift when the emitter has been moved.
+        # Instead we zero the local location and use an identity parent inverse so the wire
+        # always stays perfectly centered on the emitter regardless of its world position.
         wire_obj.parent = obj
-        wire_obj.matrix_parent_inverse = obj.matrix_world.inverted()
+        wire_obj.matrix_parent_inverse.identity()
+        wire_obj.location = (0.0, 0.0, 0.0)
+        wire_obj.rotation_euler = (0.0, 0.0, 0.0)
         
         # Create bmesh
         bm = bmesh.new()
