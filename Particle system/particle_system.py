@@ -1,7 +1,7 @@
 bl_info = {
     "name": "UPBGE Particle System",
     "author": "Ghost DEV",
-    "version": (0, 6, 1),
+    "version": (0, 7, 0),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
     "description": "Simple particle system for UPBGE using mesh instances (NO GPU)",
@@ -14,6 +14,140 @@ import bpy
 from mathutils import Vector
 import random
 
+# Wire shape visualization - OPTIMIZED
+def update_wire_shape(self, context):
+    """Update wire shape visualization - uses scale, not mesh regeneration"""
+    obj = context.object
+    if not obj:
+        return
+    
+    wire_name = f"PS_Wire_{obj.name}"
+    ps = obj.particle_system_props
+    
+    # Remove wire if disabled or POINT shape
+    if not ps.enabled or ps.emission_shape == 'POINT':
+        if wire_name in bpy.data.objects:
+            wire_obj = bpy.data.objects[wire_name]
+            bpy.data.objects.remove(wire_obj, do_unlink=True)
+        update_game_prop(self, context)
+        return
+    
+    # Check if wire already exists
+    wire_obj = bpy.data.objects.get(wire_name)
+    
+    # Create wire if it doesn't exist or shape type changed
+    needs_new_mesh = False
+    if not wire_obj:
+        needs_new_mesh = True
+    elif wire_obj.get('ps_shape_type') != ps.emission_shape:
+        # Shape type changed, remove old and create new
+        bpy.data.objects.remove(wire_obj, do_unlink=True)
+        needs_new_mesh = True
+    
+    if needs_new_mesh:
+        import bmesh
+        
+        # Create base mesh (unit size)
+        mesh = bpy.data.meshes.new(f"PS_WireMesh_{obj.name}")
+        wire_obj = bpy.data.objects.new(wire_name, mesh)
+        
+        # Store shape type
+        wire_obj['ps_shape_type'] = ps.emission_shape
+        
+        # Link to collection
+        context.collection.objects.link(wire_obj)
+        
+        # Parent to emitter (follows emitter position/rotation)
+        wire_obj.parent = obj
+        wire_obj.matrix_parent_inverse = obj.matrix_world.inverted()
+        
+        # Create bmesh
+        bm = bmesh.new()
+        
+        if ps.emission_shape == 'BOX':
+            # Create UNIT box (1x1x1) - we'll scale it later
+            verts = [
+                bm.verts.new((-0.5, -0.5, -0.5)),
+                bm.verts.new((0.5, -0.5, -0.5)),
+                bm.verts.new((0.5, 0.5, -0.5)),
+                bm.verts.new((-0.5, 0.5, -0.5)),
+                bm.verts.new((-0.5, -0.5, 0.5)),
+                bm.verts.new((0.5, -0.5, 0.5)),
+                bm.verts.new((0.5, 0.5, 0.5)),
+                bm.verts.new((-0.5, 0.5, 0.5)),
+            ]
+            
+            # Create edges
+            edges = [
+                (0,1), (1,2), (2,3), (3,0),  # Bottom
+                (4,5), (5,6), (6,7), (7,4),  # Top
+                (0,4), (1,5), (2,6), (3,7),  # Vertical
+            ]
+            for e in edges:
+                bm.edges.new((verts[e[0]], verts[e[1]]))
+                
+        elif ps.emission_shape == 'SPHERE':
+            # Create UNIT sphere (radius 1.0) - we'll scale it later
+            segments = 32
+            import math
+            
+            # XY circle
+            verts_xy = []
+            for i in range(segments):
+                angle = 2 * math.pi * i / segments
+                x = math.cos(angle)
+                y = math.sin(angle)
+                verts_xy.append(bm.verts.new((x, y, 0)))
+            
+            for i in range(segments):
+                bm.edges.new((verts_xy[i], verts_xy[(i+1) % segments]))
+            
+            # XZ circle
+            verts_xz = []
+            for i in range(segments):
+                angle = 2 * math.pi * i / segments
+                x = math.cos(angle)
+                z = math.sin(angle)
+                verts_xz.append(bm.verts.new((x, 0, z)))
+            
+            for i in range(segments):
+                bm.edges.new((verts_xz[i], verts_xz[(i+1) % segments]))
+            
+            # YZ circle
+            verts_yz = []
+            for i in range(segments):
+                angle = 2 * math.pi * i / segments
+                y = math.cos(angle)
+                z = math.sin(angle)
+                verts_yz.append(bm.verts.new((0, y, z)))
+            
+            for i in range(segments):
+                bm.edges.new((verts_yz[i], verts_yz[(i+1) % segments]))
+        
+        # Write bmesh to mesh
+        bm.to_mesh(mesh)
+        bm.free()
+        
+        # Set display properties
+        wire_obj.display_type = 'WIRE'
+        wire_obj.show_in_front = True
+        wire_obj.hide_render = True
+        wire_obj.hide_select = True
+        wire_obj.color = (0, 1, 1, 1)  # Cyan
+    
+    # Update scale based on size (OPTIMIZED - no mesh regeneration!)
+    if wire_obj:
+        if ps.emission_shape == 'BOX':
+            # Box: Scale XYZ independently
+            wire_obj.scale = ps.emission_box_size
+        elif ps.emission_shape == 'SPHERE':
+            # Sphere: Uniform scale on all axes
+            radius = ps.emission_sphere_radius
+            wire_obj.scale = (radius, radius, radius)
+    
+    # Update game properties
+    update_game_prop(self, context)
+
 def update_game_prop(self, context):
     obj = context.object
     if not obj: return
@@ -23,6 +157,8 @@ def update_game_prop(self, context):
         'enabled': 'ps_enabled',
         'trigger_enabled': 'ps_trigger',
         'emission_mode': 'ps_emission_mode',
+        'emission_shape': 'ps_emission_shape',
+        'emission_sphere_radius': 'ps_emission_sphere_radius',
         'max_particles': 'ps_max_particles',
         'emission_rate': 'ps_emission_rate',
         'emission_delay': 'ps_emission_delay',
@@ -57,6 +193,11 @@ def update_game_prop(self, context):
         obj.game.properties['ps_rotation_x'].value = self.rotation[0]
         obj.game.properties['ps_rotation_y'].value = self.rotation[1]
         obj.game.properties['ps_rotation_z'].value = self.rotation[2]
+    
+    if 'ps_emission_box_size_x' in obj.game.properties:
+        obj.game.properties['ps_emission_box_size_x'].value = self.emission_box_size[0]
+        obj.game.properties['ps_emission_box_size_y'].value = self.emission_box_size[1]
+        obj.game.properties['ps_emission_box_size_z'].value = self.emission_box_size[2]
 
     if 'ps_particle_mesh' in obj.game.properties:
         mesh_name = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
@@ -68,7 +209,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Enable Particles",
         description="Master switch for the system",
         default=False,
-        update=update_game_prop
+        update=update_wire_shape
     )
     
     trigger_enabled: bpy.props.BoolProperty(
@@ -83,6 +224,37 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         items=[('CONTINUOUS', "Continuous", ""), ('BURST', "Burst", "")],
         default='CONTINUOUS',
         update=update_game_prop
+    )
+    
+    # Emission Shape
+    emission_shape: bpy.props.EnumProperty(
+        name="Emission Shape",
+        description="Shape from which particles are emitted",
+        items=[
+            ('POINT', "Point", "Emit from center point"),
+            ('BOX', "Box", "Emit from random points within a box volume"),
+            ('SPHERE', "Sphere", "Emit from random points within a sphere volume"),
+        ],
+        default='POINT',
+        update=update_wire_shape
+    )
+    
+    emission_box_size: bpy.props.FloatVectorProperty(
+        name="Box Size",
+        description="Size of the emission box (X, Y, Z)",
+        default=(1.0, 1.0, 1.0),
+        min=0.01,
+        size=3,
+        update=update_wire_shape
+    )
+    
+    emission_sphere_radius: bpy.props.FloatProperty(
+        name="Sphere Radius",
+        description="Radius of the emission sphere",
+        default=1.0,
+        min=0.01,
+        max=100.0,
+        update=update_wire_shape
     )
     
     max_particles: bpy.props.IntProperty(name="Max Particles", default=100, min=1, max=1000, update=update_game_prop)
@@ -115,7 +287,16 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
     
-    particle_mesh: bpy.props.PointerProperty(name="Particle Mesh", type=bpy.types.Object, update=update_game_prop)
+    def particle_mesh_poll(self, object):
+        """Only allow MESH objects as particle mesh"""
+        return object.type == 'MESH'
+    
+    particle_mesh: bpy.props.PointerProperty(
+        name="Particle Mesh", 
+        type=bpy.types.Object, 
+        poll=particle_mesh_poll,
+        update=update_game_prop
+    )
     
     # Collision Properties
     enable_collision: bpy.props.BoolProperty(
@@ -161,11 +342,29 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "physics"
     
+    @classmethod
+    def poll(cls, context):
+        """Only show panel for valid emitter object types"""
+        obj = context.object
+        if obj is None:
+            return False
+        
+        # ALLOWED: Mesh, Light, Empty (all types)
+        # REJECTED: Camera, Curve, Surface, Meta, Text, Armature, Lattice, Speaker, etc.
+        allowed_types = {'MESH', 'LIGHT', 'EMPTY'}
+        return obj.type in allowed_types
+    
     def draw(self, context):
         layout = self.layout
         obj = context.object
         
-        if obj is None: return
+        if obj is None: 
+            return
+        
+        # Double-check object type (safety)
+        if obj.type not in {'MESH', 'LIGHT', 'EMPTY'}:
+            layout.label(text="Particle system not available for this object type", icon='ERROR')
+            return
         
         box = layout.box()
         box.label(text="Setup:", icon='INFO')
@@ -189,6 +388,14 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.label(text="Emission:")
             
             box.prop(ps, "emission_mode", text="Mode")
+            box.prop(ps, "emission_shape", text="Shape")
+            
+            # Show shape-specific size controls
+            if ps.emission_shape == 'BOX':
+                box.prop(ps, "emission_box_size")
+            elif ps.emission_shape == 'SPHERE':
+                box.prop(ps, "emission_sphere_radius")
+            
             # MOVED DOWN: Trigger is now below Mode
             layout.prop(ps, "trigger_enabled", text="Emission Trigger")
             
@@ -233,7 +440,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "bounce_strength", slider=True)
 
 class PARTICLE_OT_preview_toggle(bpy.types.Operator):
-    """Preview the particles in the viewport(Warning: Experimental feature)"""
+    """Toggle viewport particle preview"""
     bl_idname = "particle.preview_toggle"
     bl_label = "Toggle Particle Preview"
     
@@ -483,6 +690,11 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             self.report({'ERROR'}, "Please select an object first")
             return {'CANCELLED'}
         
+        # Validate object type
+        if init_obj.type not in {'MESH', 'LIGHT', 'EMPTY'}:
+            self.report({'ERROR'}, f"Particle system cannot be used on {init_obj.type} objects. Only MESH, LIGHT, and EMPTY are supported.")
+            return {'CANCELLED'}
+        
         # Logic Bricks
         has_sensor = any(s.name == "ParticleInit" for s in init_obj.game.sensors)
         if not has_sensor:
@@ -499,14 +711,13 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         controller.name = "ParticleController"
         controller.mode = 'SCRIPT'
         
-        # Runtime Script with NEW LOGIC
-        script_text = """# UPBGE Particle System Runtime v0.6.1
+        # Runtime Script with OBJECT POOLING for performance
+        script_text = """# UPBGE Particle System Runtime v0.8.0 - OBJECT POOLING
 
 import bge
 from bge import logic
 from mathutils import Vector
 import random
-
 class Particle:
     def __init__(self, pos, vel, lifetime, size, local_offset=None):
         self.position = Vector(pos)
@@ -515,19 +726,21 @@ class Particle:
         self.lifetime = lifetime
         self.size = size
         self.obj = None
-        self.rotation = Vector((0.0, 0.0, 0.0))  # XYZ rotation in radians
-        self.local_offset = Vector(local_offset) if local_offset else Vector((0, 0, 0))  # For LOCAL space
+        self.rotation = Vector((0.0, 0.0, 0.0))
+        self.local_offset = Vector(local_offset) if local_offset else Vector((0, 0, 0))
+        self.is_active = False  # POOLING: Track if particle is in use
 
 class ParticleSystem:
     def __init__(self, emitter_obj):
         self.emitter = emitter_obj
-        self.particles = []
+        self.particle_pool = []  # POOLING: Pre-allocated particle pool
         self.time_since_emit = 0.0
         self.particle_template = None
-        self.burst_triggered = False # Flag for One Shot
+        self.burst_triggered = False
         self.props = {}
         self.load_properties()
         self.create_particle_template()
+        self.initialize_pool()  # POOLING: Pre-create all particles
         
     def load_properties(self):
         obj = self.emitter
@@ -535,9 +748,12 @@ class ParticleSystem:
             'enabled': obj.get('ps_enabled', True),
             'trigger': obj.get('ps_trigger', True),
             'emission_mode': obj.get('ps_emission_mode', 'CONTINUOUS'),
+            'emission_shape': obj.get('ps_emission_shape', 'POINT'),
+            'emission_box_size': (obj.get('ps_emission_box_size_x', 1.0), obj.get('ps_emission_box_size_y', 1.0), obj.get('ps_emission_box_size_z', 1.0)),
+            'emission_sphere_radius': obj.get('ps_emission_sphere_radius', 1.0),
             'max_particles': obj.get('ps_max_particles', 100),
             'emission_rate': obj.get('ps_emission_rate', 10.0),
-            'emission_delay': obj.get('ps_emission_delay', 1.0), # NEW
+            'emission_delay': obj.get('ps_emission_delay', 1.0),
             'burst_count': obj.get('ps_burst_count', 30),
             'is_one_shot': obj.get('ps_is_one_shot', False),
             'lifetime': obj.get('ps_lifetime', 3.0),
@@ -559,45 +775,119 @@ class ParticleSystem:
         mesh_name = self.props.get('particle_mesh', 'ParticleSphere')
         if mesh_name in scene.objectsInactive:
             self.particle_template = scene.objectsInactive[mesh_name]
+            print(f"✓ Template: {mesh_name}")
         else:
-            print(f"Warning: Mesh {mesh_name} not found in inactive objects")
+            print(f"✗ ERROR: '{mesh_name}' not in objectsInactive!")
+    
+    def initialize_pool(self):
+        '''POOLING: Pre-allocate all particles at startup'''
+        if not self.particle_template:
+            return
+        
+        scene = logic.getCurrentScene()
+        max_particles = self.props['max_particles']
+        
+        print(f"Creating particle pool: {max_particles} particles...")
+        
+        for i in range(max_particles):
+            # Create particle data
+            p = Particle(Vector((0, 0, 0)), Vector((0, 0, 0)), 1.0, 0.1)
+            p.is_active = False
+            
+            # Pre-instantiate mesh object
+            try:
+                p.obj = scene.addObject(self.particle_template, self.emitter, 0)
+                p.obj.worldScale = [0.0, 0.0, 0.0]  # Hide it
+                p.obj.visible = False  # Extra hiding
+            except Exception as e:
+                print(f"Pool creation error: {e}")
+                continue
+            
+            self.particle_pool.append(p)
+        
+        print(f"✓ Pool ready: {len(self.particle_pool)} particles")
+    
+    def get_inactive_particle(self):
+        '''POOLING: Find first inactive particle in pool'''
+        for p in self.particle_pool:
+            if not p.is_active:
+                return p
+        return None  # Pool exhausted
             
     def emit_particle(self):
-        if not self.particle_template: return
-        if len(self.particles) >= self.props['max_particles']:
-            old_p = self.particles.pop(0)
-            if old_p.obj: old_p.obj.endObject()
+        '''POOLING: Reuse particle from pool instead of creating new one'''
+        # Get inactive particle from pool
+        p = self.get_inactive_particle()
+        if not p:
+            return  # Pool is full, can't emit
         
-        # Base velocity and randomness
+        # Calculate spawn position based on emission shape
+        emission_shape = self.props['emission_shape']
+        
+        if emission_shape == 'BOX':
+            box_size = self.props['emission_box_size']
+            local_offset = Vector((
+                (random.random() - 0.5) * box_size[0],
+                (random.random() - 0.5) * box_size[1],
+                (random.random() - 0.5) * box_size[2]
+            ))
+            spawn_pos = self.emitter.worldPosition + (self.emitter.worldOrientation @ local_offset)
+            
+        elif emission_shape == 'SPHERE':
+            radius = self.props['emission_sphere_radius']
+            import math
+            r = radius * (random.random() ** (1.0/3.0))
+            theta = 2 * math.pi * random.random()
+            phi = math.acos(2 * random.random() - 1)
+            
+            local_offset = Vector((
+                r * math.sin(phi) * math.cos(theta),
+                r * math.sin(phi) * math.sin(theta),
+                r * math.cos(phi)
+            ))
+            spawn_pos = self.emitter.worldPosition + (self.emitter.worldOrientation @ local_offset)
+            
+        else:  # POINT
+            spawn_pos = self.emitter.worldPosition.copy()
+        
+        # Calculate velocity
         base_vel = Vector(self.props['start_velocity'])
-        random_offset = Vector(((random.random()-0.5)*2*self.props['velocity_random'], (random.random()-0.5)*2*self.props['velocity_random'], (random.random()-0.5)*2*self.props['velocity_random']))
+        random_offset = Vector(((random.random()-0.5)*2*self.props['velocity_random'], 
+                                 (random.random()-0.5)*2*self.props['velocity_random'], 
+                                 (random.random()-0.5)*2*self.props['velocity_random']))
         local_velocity = base_vel + random_offset
         
-        # Transform velocity to world space if using LOCAL simulation space
         if self.props['simulation_space'] == 'LOCAL':
-            # Convert local velocity to world velocity using emitter's orientation
             world_velocity = self.emitter.worldOrientation @ local_velocity
         else:
-            # WORLD space - use velocity as-is
             world_velocity = local_velocity
         
         lifetime = self.props['lifetime'] * (1.0 + (random.random()-0.5) * self.props['lifetime_random'])
         
-        particle = Particle(self.emitter.worldPosition.copy(), world_velocity, lifetime, self.props['start_size'])
-        try:
-            particle.obj = logic.getCurrentScene().addObject(self.particle_template, self.emitter, 0)
-            particle.obj.worldPosition = particle.position
-            particle.obj.worldScale = [particle.size] * 3
-            self.particles.append(particle)
-        except: pass
+        # POOLING: Reset particle instead of creating new
+        p.position = spawn_pos
+        p.velocity = world_velocity
+        p.age = 0.0
+        p.lifetime = lifetime
+        p.size = self.props['start_size']
+        p.rotation = Vector((0.0, 0.0, 0.0))
+        p.local_offset = Vector((0, 0, 0))
+        p.is_active = True  # ACTIVATE
+        
+        # Show and position the mesh
+        if p.obj:
+            p.obj.worldPosition = p.position
+            p.obj.worldScale = [p.size] * 3
+            p.obj.visible = True
     
     def emit_burst(self):
-        for _ in range(self.props['burst_count']): self.emit_particle()
+        for _ in range(self.props['burst_count']):
+            self.emit_particle()
         
     def update(self, dt):
         self.load_properties()
         
-        # --- SPAWN LOGIC ---
+        # Spawn logic
         if self.props['enabled']:
             mode = self.props['emission_mode']
             trigger = self.props['trigger']
@@ -613,76 +903,67 @@ class ParticleSystem:
             
             elif mode == 'BURST':
                 if self.props['is_one_shot']:
-                    # One Shot Logic: Fire once on Rising Edge
                     if trigger and not self.burst_triggered:
                         self.emit_burst()
-                        self.burst_triggered = True # Lock it
+                        self.burst_triggered = True
                     elif not trigger:
-                        self.burst_triggered = False # Unlock/Reset when trigger stops
+                        self.burst_triggered = False
                 else:
-                    # Repeating Burst Logic (While Trigger is Held)
                     if trigger:
                         self.time_since_emit += dt
                         if self.time_since_emit >= self.props['emission_delay']:
                             self.emit_burst()
                             self.time_since_emit = 0.0
         
-        # --- PHYSICS LOGIC ---
+        # POOLING: Only update ACTIVE particles
         grav = Vector(self.props['gravity'])
         enable_collision = self.props['enable_collision']
         bounce = self.props['bounce_strength']
-        to_remove = []
         
-        for i, p in enumerate(self.particles):
-            p.age += dt
-            if p.age >= p.lifetime:
-                to_remove.append(i)
-                if p.obj: p.obj.endObject()
+        for p in self.particle_pool:
+            if not p.is_active:  # POOLING: Skip inactive particles
                 continue
             
-            # Apply gravity (in world space or local space based on simulation_space)
+            p.age += dt
+            
+            # POOLING: Deactivate instead of destroying
+            if p.age >= p.lifetime:
+                p.is_active = False
+                if p.obj:
+                    p.obj.worldScale = [0.0, 0.0, 0.0]  # Hide
+                    p.obj.visible = False
+                continue
+            
+            # Physics
             if self.props['simulation_space'] == 'LOCAL':
-                # Transform gravity to local space
                 local_grav = self.emitter.worldOrientation.transposed() @ grav
                 p.velocity += local_grav * dt
             else:
                 p.velocity += grav * dt
             
-            # Collision detection
+            # Collision
             if enable_collision and p.obj:
-                # Raycast from current position to next position
                 next_pos = p.position + p.velocity * dt
                 direction = next_pos - p.position
                 distance = direction.length
                 
                 if distance > 0:
                     direction.normalize()
-                    # Perform raycast
                     hit_obj, hit_pos, hit_normal = p.obj.rayCast(next_pos, p.position, distance)
                     
                     if hit_obj:
-                        # Collision detected!
-                        # Reflect velocity based on surface normal
                         dot = p.velocity.dot(hit_normal)
                         p.velocity = p.velocity - 2 * dot * hit_normal
-                        
-                        # Apply bounce strength (damping)
                         p.velocity *= bounce
-                        
-                        # Position particle slightly above surface to prevent sticking
                         p.position = hit_pos + hit_normal * 0.01
                     else:
-                        # No collision, move normally
                         if self.props['simulation_space'] == 'LOCAL':
-                            # In local space, update offset and calculate world position
                             p.local_offset += p.velocity * dt
                             p.position = self.emitter.worldPosition + (self.emitter.worldOrientation @ p.local_offset)
                         else:
                             p.position += p.velocity * dt
             else:
-                # No collision check, move normally
                 if self.props['simulation_space'] == 'LOCAL':
-                    # In local space, update offset and calculate world position from emitter
                     p.local_offset += p.velocity * dt
                     p.position = self.emitter.worldPosition + (self.emitter.worldOrientation @ p.local_offset)
                 else:
@@ -694,50 +975,57 @@ class ParticleSystem:
                 p.size = self.props['start_size'] + (self.props['end_size'] - self.props['start_size']) * life_ratio
                 p.obj.worldScale = [p.size] * 3
                 
-                # Rotation (XYZ)
+                # Rotation
                 rotation_xyz = self.props['rotation']
                 if rotation_xyz[0] != 0 or rotation_xyz[1] != 0 or rotation_xyz[2] != 0:
                     import math
-                    # Calculate rotation speed for each axis (radians per second)
                     rotation_speed_x = math.radians(rotation_xyz[0]) / p.lifetime
                     rotation_speed_y = math.radians(rotation_xyz[1]) / p.lifetime
                     rotation_speed_z = math.radians(rotation_xyz[2]) / p.lifetime
                     
-                    # Update rotation on all axes
                     p.rotation.x += rotation_speed_x * dt
                     p.rotation.y += rotation_speed_y * dt
                     p.rotation.z += rotation_speed_z * dt
                     
-                    # Apply combined rotation
                     p.obj.worldOrientation = [p.rotation.x, p.rotation.y, p.rotation.z]
-        
-        for i in reversed(to_remove): self.particles.pop(i)
 
 class ParticleManager:
     def __init__(self):
         self.systems = {}
         self.last_time = 0.0
+        print("="*60)
+        print("PARTICLE SYSTEM v0.8.0 - OBJECT POOLING")
+        print("="*60)
+    
     def scan(self):
         scene = logic.getCurrentScene()
         for obj in scene.objects:
             if 'ps_enabled' in obj:
-                if obj.name not in self.systems: self.systems[obj.name] = ParticleSystem(obj)
+                if obj.name not in self.systems:
+                    self.systems[obj.name] = ParticleSystem(obj)
             elif obj.name in self.systems:
-                for p in self.systems[obj.name].particles:
-                    if p.obj: p.obj.endObject()
+                # POOLING: Clean up pool on removal
+                system = self.systems[obj.name]
+                for p in system.particle_pool:
+                    if p.obj:
+                        p.obj.endObject()
                 del self.systems[obj.name]
+    
     def update(self):
         cur = logic.getClockTime()
         dt = cur - self.last_time if self.last_time > 0 else 0.016
         self.last_time = cur
         dt = min(dt, 0.1)
-        for sys in self.systems.values(): sys.update(dt)
+        
+        for sys in self.systems.values():
+            sys.update(dt)
 
 def init():
     if not hasattr(logic, '_pm'):
         logic._pm = ParticleManager()
         logic.getCurrentScene().pre_draw.append(lambda c: logic._pm.update())
         logic._pm.scan()
+
 init()
 """
         
@@ -765,9 +1053,11 @@ init()
         ensure_prop('ps_enabled', 'BOOL', props.enabled)
         ensure_prop('ps_trigger', 'BOOL', props.trigger_enabled)
         ensure_prop('ps_emission_mode', 'STRING', props.emission_mode)
+        ensure_prop('ps_emission_shape', 'STRING', props.emission_shape)
+        ensure_prop('ps_emission_sphere_radius', 'FLOAT', props.emission_sphere_radius)
         ensure_prop('ps_max_particles', 'INT', props.max_particles)
         ensure_prop('ps_emission_rate', 'FLOAT', props.emission_rate)
-        ensure_prop('ps_emission_delay', 'FLOAT', props.emission_delay) # NEW
+        ensure_prop('ps_emission_delay', 'FLOAT', props.emission_delay)
         ensure_prop('ps_burst_count', 'INT', props.burst_count)
         ensure_prop('ps_is_one_shot', 'BOOL', props.is_one_shot)
         ensure_prop('ps_lifetime', 'FLOAT', props.lifetime)
@@ -775,11 +1065,14 @@ init()
         ensure_prop('ps_start_size', 'FLOAT', props.start_size)
         ensure_prop('ps_end_size', 'FLOAT', props.end_size)
         ensure_prop('ps_velocity_random', 'FLOAT', props.velocity_random)
-        # Start velocity
+        
+        ensure_prop('ps_emission_box_size_x', 'FLOAT', props.emission_box_size[0])
+        ensure_prop('ps_emission_box_size_y', 'FLOAT', props.emission_box_size[1])
+        ensure_prop('ps_emission_box_size_z', 'FLOAT', props.emission_box_size[2])
+        
         ensure_prop('ps_start_velocity_x', 'FLOAT', props.start_velocity[0])
         ensure_prop('ps_start_velocity_y', 'FLOAT', props.start_velocity[1])
         ensure_prop('ps_start_velocity_z', 'FLOAT', props.start_velocity[2])
-        # Gravity force
         ensure_prop('ps_gravity_x', 'FLOAT', props.gravity[0])
         ensure_prop('ps_gravity_y', 'FLOAT', props.gravity[1])
         ensure_prop('ps_gravity_z', 'FLOAT', props.gravity[2])
@@ -816,6 +1109,11 @@ def register():
     bpy.types.Object.particle_system_props = bpy.props.PointerProperty(type=ParticleSystemProperties)
 
 def unregister():
+    # Clean up all wire shapes
+    wire_objects = [obj for obj in bpy.data.objects if obj.name.startswith("PS_Wire_")]
+    for wire_obj in wire_objects:
+        bpy.data.objects.remove(wire_obj, do_unlink=True)
+    
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Object.particle_system_props
