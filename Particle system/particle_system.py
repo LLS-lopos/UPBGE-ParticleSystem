@@ -31,7 +31,7 @@ def update_wire_shape(self, context):
     wire_box = bpy.data.objects.get(wire_box_name)
     wire_sphere = bpy.data.objects.get(wire_sphere_name)
     
-    # If disabled or POINT shape, hide all wires but DON'T delete
+    # Hide the wires if point is selected
     if not ps.enabled or ps.emission_shape == 'POINT':
         if wire_box:
             wire_box.hide_viewport = True
@@ -42,11 +42,11 @@ def update_wire_shape(self, context):
         update_game_prop(self, context)
         return
     
-    # Create Box wire
+    # Create Box wire 
     if not wire_box:
         wire_box = create_box_wire(obj, wire_box_name)
     
-    # Create Sphere wire 
+    # Create Sphere wire
     if not wire_sphere:
         wire_sphere = create_sphere_wire(obj, wire_sphere_name)
     
@@ -101,9 +101,9 @@ def create_box_wire(obj, wire_name):
     
     # Parent to emitter with identity inverse so wire is always at emitter's local origin
     wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__() 
+    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
     
-    # Create bmesh
+    # Create bmesh (UNIT box)
     bm = bmesh.new()
     
     verts = [
@@ -153,9 +153,9 @@ def create_sphere_wire(obj, wire_name):
     
     # Parent to emitter with identity inverse so wire is always at emitter's local origin
     wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
+    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__() 
     
-    # Create bmesh (UNIT sphere)
+    # Create bmesh (UNIT sphere radius 1.0)
     bm = bmesh.new()
     segments = 32
     
@@ -328,7 +328,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     max_particles: bpy.props.IntProperty(name="Max Particles", default=100, min=1, max=1000, update=update_game_prop)
     emission_rate: bpy.props.FloatProperty(name="Emission Rate", default=10.0, min=0.0, max=100.0, update=update_game_prop)
     
-    # NEW: Delay for Burst Mode
     emission_delay: bpy.props.FloatProperty(name="Burst Delay", description="Time between bursts (seconds)", default=1.0, min=0.1, max=100.0, update=update_game_prop)
     
     burst_count: bpy.props.IntProperty(name="Burst Count", default=30, min=1, max=500, update=update_game_prop)
@@ -355,7 +354,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
     
-    # Force-Based Properties
+    # Force-Based
     force: bpy.props.FloatVectorProperty(
         name="Force",
         description="Applied force (acceleration) in units/sec²",
@@ -363,7 +362,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         size=3,
         update=update_game_prop
     )
-    
+    # Torque
     torque: bpy.props.FloatVectorProperty(
         name="Torque",
         description="Angular force (rotational acceleration) in degrees/sec²",
@@ -371,7 +370,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         size=3,
         update=update_game_prop
     )
-    
+    # Damping
     damping: bpy.props.FloatProperty(
         name="Damping",
         description="Air resistance (0=none, 1=immediate stop)",
@@ -421,7 +420,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
     
-    # Rotation Property (XYZ like velocity)
+    # Rotation Property (XYZ)
     rotation: bpy.props.FloatVectorProperty(
         name="Rotation",
         description="Rotation in degrees per lifetime (X, Y, Z axes)",
@@ -435,7 +434,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     # Preview mode property
     preview_active: bpy.props.BoolProperty(
         name="Preview Active",
-        description="Internal property to track preview state",
+        description="Internal property to track preview state (Warning: experimental feature)",
         default=False
     )
 
@@ -767,11 +766,10 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         else:  # POINT — use matrix translation to respect parent transforms
             spawn_pos = mat.translation.copy()
         
-        # Create particle mesh INSTANCE (Alt+D - linked duplicate)
+        # Create particle mesh INSTANCE
         if ps.particle_mesh:
-            # Use copy() for object but SHARE mesh data (Alt+D method)
             particle_obj = ps.particle_mesh.copy()
-            particle_obj.data = ps.particle_mesh.data  # Share mesh data (no .copy()!)
+            particle_obj.data = ps.particle_mesh.data  # Share mesh data
         else:
             # Create default sphere (only once per preview session, then reuse)
             if self._default_sphere is None or self._default_sphere.name not in bpy.data.objects:
@@ -905,7 +903,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         controller = existing_ctrl
         
         # Runtime Script with OBJECT POOLING for performance
-        script_text = """# UPBGE Particle System Runtime v0.9.0 - OPTIMIZED
+        script_text = """# UPBGE Particle System Runtime v0.7.0
 
 import bge
 from bge import logic
@@ -1291,8 +1289,7 @@ class ParticleSystem:
                             self.time_since_emit = 0.0
 
         # --- Particle update loop (hot path) ---
-        acc              = self._acc           # pre-built acceleration vector
-        is_local         = self._is_local
+        acc              = self._acc
         is_force         = self._is_force
         damping_factor   = self._damping_factor
         enable_collision = self._enable_collision
@@ -1300,7 +1297,6 @@ class ParticleSystem:
         size_start       = self._size_start
         size_delta       = self._size_delta
         rot_has_value    = self._rot_has_value
-        emitter_pos      = self.emitter.worldPosition
         emitter_ori      = self.emitter.worldOrientation
 
         if is_force:
@@ -1327,13 +1323,7 @@ class ParticleSystem:
                 p.velocity *= damping_fac
 
             # Position integration
-            if is_local:
-                p.local_offset += p.velocity * dt
-                p.position.x = emitter_pos.x + emitter_ori[0][0]*p.local_offset.x + emitter_ori[0][1]*p.local_offset.y + emitter_ori[0][2]*p.local_offset.z
-                p.position.y = emitter_pos.y + emitter_ori[1][0]*p.local_offset.x + emitter_ori[1][1]*p.local_offset.y + emitter_ori[1][2]*p.local_offset.z
-                p.position.z = emitter_pos.z + emitter_ori[2][0]*p.local_offset.x + emitter_ori[2][1]*p.local_offset.y + emitter_ori[2][2]*p.local_offset.z
-            else:
-                p.position += p.velocity * dt
+            p.position += p.velocity * dt
 
             # Collision
             if enable_collision and p.obj:
@@ -1418,7 +1408,7 @@ def init():
 init()
 """
         
-        # Script - write only if controller has no script or the text block was deleted
+        # Write the script only if controller has no script or the text block was deleted
         import time
         script_needs_write = (
             not controller.text or
@@ -1463,14 +1453,15 @@ init()
         ensure_prop('ps_start_size', 'FLOAT', props.start_size)
         ensure_prop('ps_end_size', 'FLOAT', props.end_size)
         ensure_prop('ps_velocity_random', 'FLOAT', props.velocity_random)
-        
+        # Emission box
         ensure_prop('ps_emission_box_size_x', 'FLOAT', props.emission_box_size[0])
         ensure_prop('ps_emission_box_size_y', 'FLOAT', props.emission_box_size[1])
         ensure_prop('ps_emission_box_size_z', 'FLOAT', props.emission_box_size[2])
-        
+        # Start velocity
         ensure_prop('ps_start_velocity_x', 'FLOAT', props.start_velocity[0])
         ensure_prop('ps_start_velocity_y', 'FLOAT', props.start_velocity[1])
         ensure_prop('ps_start_velocity_z', 'FLOAT', props.start_velocity[2])
+        # Gravity
         ensure_prop('ps_gravity_x', 'FLOAT', props.gravity[0])
         ensure_prop('ps_gravity_y', 'FLOAT', props.gravity[1])
         ensure_prop('ps_gravity_z', 'FLOAT', props.gravity[2])
@@ -1509,7 +1500,7 @@ init()
         if not added:
             self.report({'WARNING'}, "Particle system already fully initialized, nothing to add!")
         else:
-            # Summarise what was added - group props together for a clean message
+            # Summarise what was added
             logic_parts = [x for x in added if not x.startswith("prop:")]
             new_props = [x for x in added if x.startswith("prop:")]
             summary = logic_parts[:]
