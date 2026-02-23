@@ -28,7 +28,7 @@ It's an addon design for UPBGE 0.5+ to create particle effects for your game wit
 You can control the particle spawning with *Logic Brick* or *Logic nodes* by using **ps_tigger** bool property
 
 > [!WARNING]
-The performance is not great since the Add-on uses CPU and object pooling is not implemented yet, but to deliver the best performance, follow these steps:
+The performance is not great since the Add-on uses CPU, but to deliver the best performance, follow these steps:
 1. Select the object you want to use as a  particle
 2. Go to **object properties** and enable ***UPBGE Dupli Base***
 3. Change the physics properties to **No Collision** and uncheck **Sound Occluder**
