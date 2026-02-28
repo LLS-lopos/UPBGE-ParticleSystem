@@ -4,7 +4,7 @@ bl_info = {
     "version": (0, 7, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
-    "description": "Simple particle system for UPBGE using mesh instances",
+    "description": "Simple particle system for UPBGE using mesh instances (NO GPU)",
     "warning": "It is still an alpha version and it is not stable at all times",
     "wiki_url": "",
     "category": "Physics",
@@ -31,7 +31,7 @@ def update_wire_shape(self, context):
     wire_box = bpy.data.objects.get(wire_box_name)
     wire_sphere = bpy.data.objects.get(wire_sphere_name)
     
-    # If disabled or POINT shape, hide all wires but DON'T delete
+    # If disabled or POINT shape, hide all wires
     if not ps.enabled or ps.emission_shape == 'POINT':
         if wire_box:
             wire_box.hide_viewport = True
@@ -50,11 +50,11 @@ def update_wire_shape(self, context):
     if not wire_sphere:
         wire_sphere = create_sphere_wire(obj, wire_sphere_name)
     
-    # Show/hide based on current shape (NO regeneration!)
+    # Show/hide based on current shape
     if ps.emission_shape == 'BOX':
-        # Parent to emitter with identity inverse so local origin = emitter origin
+
         wire_box.parent = obj
-        wire_box.matrix_parent_inverse = obj.matrix_world.__class__()  # 4x4 identity
+        wire_box.matrix_parent_inverse = obj.matrix_world.__class__()
         
         # Keep wire centered on emitter in local space
         wire_box.location = (0, 0, 0)
@@ -70,7 +70,7 @@ def update_wire_shape(self, context):
     elif ps.emission_shape == 'SPHERE':
         # Parent to emitter with identity inverse so local origin = emitter origin
         wire_sphere.parent = obj
-        wire_sphere.matrix_parent_inverse = obj.matrix_world.__class__()  # 4x4 identity
+        wire_sphere.matrix_parent_inverse = obj.matrix_world.__class__()
         
         # Keep wire centered on emitter in local space
         wire_sphere.location = (0, 0, 0)
@@ -101,7 +101,7 @@ def create_box_wire(obj, wire_name):
     
     # Parent to emitter with identity inverse so wire is always at emitter's local origin
     wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()  # 4x4 identity
+    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
     
     # Create bmesh (UNIT box)
     bm = bmesh.new()
@@ -153,9 +153,9 @@ def create_sphere_wire(obj, wire_name):
     
     # Parent to emitter with identity inverse so wire is always at emitter's local origin
     wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()  # 4x4 identity
+    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
     
-    # Create bmesh (UNIT sphere - radius 1.0)
+    # Create bmesh
     bm = bmesh.new()
     segments = 32
     
@@ -231,6 +231,11 @@ def update_game_prop(self, context):
         'enable_collision': 'ps_enable_collision',
         'bounce_strength': 'ps_bounce_strength',
         'particle_type': 'ps_particle_type',
+        'start_alpha': 'ps_start_alpha',
+        'color_start_time': 'ps_color_start_time',
+        'color_end_time': 'ps_color_end_time',
+        'enable_color': 'ps_enable_color',
+        'enable_alpha': 'ps_enable_alpha',
     }
     
     for addon_prop, game_prop in props_map.items():
@@ -271,6 +276,16 @@ def update_game_prop(self, context):
     if 'ps_particle_mesh' in obj.game.properties:
         mesh_name = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
         obj.game.properties['ps_particle_mesh'].value = mesh_name
+
+    if 'ps_color_start_r' in obj.game.properties:
+        obj.game.properties['ps_color_start_r'].value = self.color_start[0]
+        obj.game.properties['ps_color_start_g'].value = self.color_start[1]
+        obj.game.properties['ps_color_start_b'].value = self.color_start[2]
+
+    if 'ps_color_end_r' in obj.game.properties:
+        obj.game.properties['ps_color_end_r'].value = self.color_end[0]
+        obj.game.properties['ps_color_end_g'].value = self.color_end[1]
+        obj.game.properties['ps_color_end_b'].value = self.color_end[2]
 
 # Particle System Properties
 class ParticleSystemProperties(bpy.types.PropertyGroup):
@@ -416,7 +431,24 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         poll=particle_mesh_poll,
         update=update_game_prop
     )
-    
+
+    enable_texture: bpy.props.BoolProperty(
+        name="Enable Texture",
+        description=(
+            "When OFF: simple Object Color material only — no transparency issues. "
+            "When ON: full UV + Image Texture node graph is generated on Initialize. "
+            "You must assign an image to the Image Texture node, "
+            "otherwise the billboard will appear transparent."
+        ),
+        default=False,
+    )
+
+    billboard_texture: bpy.props.PointerProperty(
+        name="Texture",
+        type=bpy.types.Image,
+        description="Image to apply to the billboard material",
+    )
+
     # Collision Properties
     enable_collision: bpy.props.BoolProperty(
         name="Enable Collision",
@@ -444,7 +476,67 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         size=3,
         update=update_game_prop
     )
-    
+
+    # Color over lifetime
+    enable_color: bpy.props.BoolProperty(
+        name="Color over Lifetime",
+        description="Enable color interpolation over the particle's lifetime",
+        default=False,
+        update=update_game_prop
+    )
+
+    color_start: bpy.props.FloatVectorProperty(
+        name="Color Start",
+        description="Particle color at birth",
+        default=(1.0, 1.0, 1.0),
+        min=0.0, max=1.0,
+        size=3,
+        subtype='COLOR',
+        update=update_game_prop
+    )
+
+    color_end: bpy.props.FloatVectorProperty(
+        name="Color End",
+        description="Particle color at death",
+        default=(1.0, 0.0, 0.0),
+        min=0.0, max=1.0,
+        size=3,
+        subtype='COLOR',
+        update=update_game_prop
+    )
+
+    color_start_time: bpy.props.FloatProperty(
+        name="Start Time",
+        description="Lifetime ratio (0-10) when color transition begins. Lower = starts earlier",
+        default=0.0,
+        min=0.0, max=10.0,
+        update=update_game_prop
+    )
+
+    color_end_time: bpy.props.FloatProperty(
+        name="End Time",
+        description="Lifetime ratio (0-10) when color transition ends. Higher = ends later",
+        default=10.0,
+        min=0.0, max=10.0,
+        update=update_game_prop
+    )
+
+    # Alpha over lifetime
+    enable_alpha: bpy.props.BoolProperty(
+        name="Alpha over Lifetime",
+        description="Enable alpha fade over the particle's lifetime",
+        default=False,
+        update=update_game_prop
+    )
+
+    start_alpha: bpy.props.FloatProperty(
+        name="Start Alpha",
+        description="Opacity at birth (1.0 = fully opaque, 0.0 = invisible). Fades to 0 accelerating near death",
+        default=1.0,
+        min=0.0, max=1.0,
+        update=update_game_prop
+    )
+
     # Preview mode property
     preview_active: bpy.props.BoolProperty(
         name="Preview Active",
@@ -468,7 +560,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         if obj is None:
             return False
         
-        # ALLOWED: Mesh, Light, Empty (all types)
+        # ALLOWED: Mesh, Light, Empty
         # REJECTED: Camera, Curve, Surface, Meta, Text, Armature, Lattice, Speaker, etc.
         allowed_types = {'MESH', 'LIGHT', 'EMPTY'}
         return obj.type in allowed_types
@@ -515,14 +607,14 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             elif ps.emission_shape == 'SPHERE':
                 box.prop(ps, "emission_sphere_radius")
             
-            # Trigger bool
+            # MOVED DOWN: Trigger is now below Mode
             layout.prop(ps, "trigger_enabled", text="Emission Trigger")
             
             box.prop(ps, "max_particles")
-            # Continuous mode
+            
             if ps.emission_mode == 'CONTINUOUS':
                 box.prop(ps, "emission_rate")
-            else: # Burst mode
+            else: # BURST MODE
                 box.prop(ps, "burst_count")
                 box.prop(ps, "is_one_shot")
                 # HIDE DELAY IF ONE SHOT IS ACTIVE
@@ -539,21 +631,51 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.prop(ps, "particle_type", text="Particle Type")
             
             if ps.particle_type == 'MESH':
-
+                # Lock particle mesh during preview to prevent crashes
                 mesh_row = box.row()
                 mesh_row.enabled = not ps.preview_active
                 mesh_row.prop(ps, "particle_mesh")
                 if ps.preview_active:
                     box.label(text="(Mesh locked during preview)", icon='LOCKED')
             else:
-                # Billboard mode plane
+                # Billboard mode plane info
                 bb_name = f"PS_BP_{obj.name}"
                 if bb_name in bpy.data.objects:
-                    box.label(text=f"Particle: {bb_name}", icon='MESH_PLANE')
+                    box.label(text=f"Plane: {bb_name}", icon='MESH_PLANE')
 
             box.prop(ps, "start_size")
             box.prop(ps, "end_size")
-            
+
+            # Material settings
+            box.separator()
+            box.label(text="Material:", icon='MATERIAL')
+
+            # Texture
+            box.prop(ps, "enable_texture", text="Enable Texture")
+            if ps.enable_texture:
+                box.prop(ps, "billboard_texture", text="Image")
+                if not ps.billboard_texture:
+                    box.label(text="No image selected — texture slot will be empty", icon='ERROR')
+
+            # Color over Lifetime
+            box.prop(ps, "enable_color", text="Color over Lifetime")
+            if ps.enable_color:
+                row2 = box.row()
+                row2.prop(ps, "color_start", text="Start")
+                row2.prop(ps, "color_end", text="End")
+                row3 = box.row(align=True)
+                row3.prop(ps, "color_start_time", text="From")
+                row3.prop(ps, "color_end_time", text="To")
+
+            # Alpha over Lifetime
+            box.prop(ps, "enable_alpha", text="Alpha over Lifetime")
+            if ps.enable_alpha:
+                box.prop(ps, "start_alpha", text="Start Alpha", slider=True)
+
+            # Apply Material button
+            box.separator()
+            box.operator("particle.apply_material", text="Apply Material", icon='NODE_MATERIAL')
+
             # Physics
             box = layout.box()
             box.label(text="Physics:")
@@ -567,7 +689,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "rotation")
                 box.prop(ps, "velocity_random")
                 box.prop(ps, "gravity")
-            else:  # FORCE mode
+            else:
                 # Force-based mode
                 box.prop(ps, "start_velocity", text="Initial Velocity")
                 box.prop(ps, "force")
@@ -588,17 +710,17 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
     bl_label = "Toggle Particle Preview"
     
     _timer = None
-    _particles = None 
+    _particles = None       
     _time_accumulator = 0.0
     _last_time = 0.0
     _burst_timer = 0.0
     _burst_triggered = False
-    _original_object = None
-    _default_sphere = None
-    _billboard_mesh = None
+    _original_object = None  
+    _default_sphere = None   
+    _billboard_mesh = None   
     
     def modal(self, context, event):
-        # Check if user pressed P
+        # Check if user pressed 
         if event.type == 'P' and event.value == 'PRESS':
             self.cancel(context)
             return {'CANCELLED'}
@@ -643,7 +765,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             if is_force:
                 force_vec    = Vector(ps.force)
                 damping      = ps.damping
-                acc          = (force_vec + gravity) * dt   # combined acceleration per frame
+                acc          = (force_vec + gravity) * dt
                 damp_factor  = 1.0 - damping * dt
                 torque_xyz   = ps.torque
                 has_torque   = (torque_xyz[0] != 0 or torque_xyz[1] != 0 or torque_xyz[2] != 0)
@@ -719,7 +841,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                                 particle_obj.rotation_euler = rot_mat.to_euler()
                             break
 
-                # Rotation (only for MESH type, billboard handles its own orientation)
+                # Rotation (only for MESH type — billboard handles its own orientation)
                 if not is_billboard:
                     if is_force and has_torque:
                         # Torque accumulates angular velocity, damping applied
@@ -820,7 +942,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         is_billboard = (ps.particle_type == 'BILLBOARD')
 
         if is_billboard:
-            # Auto create a plane 
+            # Auto-create a plane (shared mesh, instanced objects)
             if self._billboard_mesh is None:
                 import bmesh as _bmesh
                 bm_data = bpy.data.meshes.new("PS_BillboardMesh")
@@ -881,7 +1003,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             self.cancel(context)
             return {'CANCELLED'}
         else:
-            # Start preview 
+            # Start preview - always reinitialize instance state to prevent bleed
             ps.preview_active = True
             self._particles = []
             self._time_accumulator = 0.0
@@ -958,7 +1080,15 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         v1 = bm.verts.new(( s, 0.0, -s))
         v2 = bm.verts.new(( s, 0.0,  s))
         v3 = bm.verts.new((-s, 0.0,  s))
-        bm.faces.new((v0, v1, v2, v3))
+        face = bm.faces.new((v0, v1, v2, v3))
+
+        # Generate a proper UV map so Image Texture nodes work correctly.
+        # Standard unwrap: bottom-left=(0,0) → top-right=(1,1)
+        uv_layer = bm.loops.layers.uv.new("UVMap")
+        uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        for loop, uv in zip(face.loops, uvs):
+            loop[uv_layer].uv = uv
+
         bm.to_mesh(mesh)
         bm.free()
 
@@ -966,17 +1096,18 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         context.collection.objects.link(plane_obj)
 
         # Keep visible in viewport so users can select it and manage material slots.
-    
         plane_obj.hide_render = False
-        plane_obj.hide_select = False   
+        plane_obj.hide_select = False   # Must be selectable so users can add/remove material slots
         plane_obj['ps_auto_billboard'] = True
 
-        # Disable all physics  
+        # Disable all physics so billboard instances never collide
         plane_obj.game.physics_type = 'NO_COLLISION'
 
-        # Create a default blank material slot so users can assign a texture right away.
-        mat = bpy.data.materials.new(name=f"PS_BillboardMat_{init_obj.name}")
-        mat.use_nodes = True
+        # Create material and build nodes via the shared helper on PARTICLE_OT_apply_material.
+        # This keeps node logic in one place — Apply Material button uses the same code.
+        mat_name = f"PS_BillboardMat_{init_obj.name}"
+        mat = bpy.data.materials.get(mat_name) or bpy.data.materials.new(name=mat_name)
+        PARTICLE_OT_apply_material._build_nodes(mat, init_obj.particle_system_props)
         plane_obj.data.materials.append(mat)
 
         return plane_name
@@ -1001,16 +1132,16 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             self.report({'ERROR'}, f"Particle system cannot be used on {init_obj.type} objects. Only MESH, LIGHT, and EMPTY are supported.")
             return {'CANCELLED'}
 
-        added = []
+        added = []  # Track what was added so we can report it
 
-        # Sensor
+        # Sensor - add only if missing
         if not any(s.name == "ParticleInit" for s in init_obj.game.sensors):
             bpy.ops.logic.sensor_add(type='ALWAYS', name="ParticleInit", object=init_obj.name)
             init_obj.game.sensors[-1].name = "ParticleInit"
             init_obj.game.sensors[-1].use_pulse_true_level = False
             added.append("Sensor")
 
-        # Controller
+        # Controller - add only if missing, or if the script text was deleted
         existing_ctrl = next((c for c in init_obj.game.controllers if c.name == "ParticleController"), None)
         script_missing = existing_ctrl and (not existing_ctrl.text or existing_ctrl.text.name not in bpy.data.texts)
         if not existing_ctrl:
@@ -1022,7 +1153,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         controller = existing_ctrl
         
         # Runtime Script with OBJECT POOLING for performance
-        script_text = """# UPBGE Particle System Runtime v0.7.0
+        script_text = """# UPBGE Particle System Runtime v0.7.1
 
 import bge
 from bge import logic
@@ -1126,6 +1257,17 @@ class ParticleSystem:
             g('ps_rotation_z',          0.0),    # 38
             g('ps_particle_type',       'MESH'), # 39
             g('ps_billboard_template',  ''),     # 40
+            g('ps_color_start_r',       1.0),    # 41
+            g('ps_color_start_g',       1.0),    # 42
+            g('ps_color_start_b',       1.0),    # 43
+            g('ps_color_end_r',         1.0),    # 44
+            g('ps_color_end_g',         0.0),    # 45
+            g('ps_color_end_b',         0.0),    # 46
+            g('ps_color_start_time',    0.0),    # 47
+            g('ps_color_end_time',      10.0),   # 48
+            g('ps_start_alpha',         1.0),    # 49
+            g('ps_enable_color',        False),  # 50
+            g('ps_enable_alpha',        False),  # 51
         )
 
     def _build_props_from_raw(self, r):
@@ -1161,6 +1303,13 @@ class ParticleSystem:
             'rotation':              (r[36], r[37], r[38]),
             'particle_type':          r[39],
             'billboard_template':     r[40],
+            'color_start':           (r[41], r[42], r[43]),
+            'color_end':             (r[44], r[45], r[46]),
+            'color_start_time':       r[47],
+            'color_end_time':         r[48],
+            'start_alpha':            r[49],
+            'enable_color':           r[50],
+            'enable_alpha':           r[51],
         }
 
     def load_properties(self):
@@ -1234,6 +1383,18 @@ class ParticleSystem:
 
         # Billboard mode flag
         self._is_billboard = (p['particle_type'] == 'BILLBOARD')
+
+        # Color over lifetime
+        self._enable_color     = p['enable_color']
+        self._color_start      = p['color_start']
+        self._color_end        = p['color_end']
+        # Normalise the 0-10 timing values to 0-1 ratios
+        self._color_t_start    = p['color_start_time'] / 10.0
+        self._color_t_end      = max(p['color_end_time'] / 10.0, self._color_t_start + 0.0001)
+
+        # Alpha over lifetime
+        self._enable_alpha     = p['enable_alpha']
+        self._start_alpha      = p['start_alpha']
 
     # ------------------------------------------------------------------
     # Pool management
@@ -1456,6 +1617,15 @@ class ParticleSystem:
             _scene = logic.getCurrentScene()
             bb_cam = _scene.active_camera
 
+        # Color & alpha locals
+        enable_color  = self._enable_color
+        enable_alpha  = self._enable_alpha
+        color_start   = self._color_start
+        color_end     = self._color_end
+        color_t_start = self._color_t_start
+        color_t_end   = self._color_t_end
+        start_alpha   = self._start_alpha
+
         for p in self.particle_pool:
             if not p.is_active:
                 continue
@@ -1504,6 +1674,25 @@ class ParticleSystem:
                 s = size_start + size_delta * life_ratio
                 p.size = s
                 obj.worldScale = [s, s, s]
+
+                # Color & alpha — only write obj.color if at least one feature is on,
+                # avoiding an unnecessary per-particle dict write when both are disabled.
+                if enable_color or enable_alpha:
+                    if enable_color:
+                        t = (life_ratio - color_t_start) / (color_t_end - color_t_start)
+                        t = max(0.0, min(1.0, t))
+                        cr = color_start[0] + (color_end[0] - color_start[0]) * t
+                        cg = color_start[1] + (color_end[1] - color_start[1]) * t
+                        cb = color_start[2] + (color_end[2] - color_start[2]) * t
+                    else:
+                        cr = cg = cb = 1.0
+
+                    if enable_alpha:
+                        alpha = start_alpha * ((1.0 - life_ratio) ** (1.0 / start_alpha))
+                    else:
+                        alpha = 1.0
+
+                    obj.color = [cr, cg, cb, alpha]
 
                 # Billboard: face the active camera every frame
                 if is_billboard:
@@ -1580,7 +1769,7 @@ def init():
 init()
 """
         
-        # Script
+        # Script - write only if controller has no script or the text block was deleted
         import time
         script_needs_write = (
             not controller.text or
@@ -1601,7 +1790,7 @@ init()
         if sensor:
             controller.link(sensor=sensor)
         
-        # Property Creation
+        # Property Creation - only adds missing props
         def ensure_prop(name, type, value):
             if name not in init_obj.game.properties:
                 bpy.ops.object.game_property_new(type=type, name=name)
@@ -1669,7 +1858,22 @@ init()
         ensure_prop('ps_particle_mesh', 'STRING', mesh_name)
         ensure_prop('ps_particle_type', 'STRING', props.particle_type)
 
-        # Billboard
+        # Color over lifetime
+        ensure_prop('ps_enable_color',     'BOOL',  props.enable_color)
+        ensure_prop('ps_color_start_r', 'FLOAT', props.color_start[0])
+        ensure_prop('ps_color_start_g', 'FLOAT', props.color_start[1])
+        ensure_prop('ps_color_start_b', 'FLOAT', props.color_start[2])
+        ensure_prop('ps_color_end_r',   'FLOAT', props.color_end[0])
+        ensure_prop('ps_color_end_g',   'FLOAT', props.color_end[1])
+        ensure_prop('ps_color_end_b',   'FLOAT', props.color_end[2])
+        ensure_prop('ps_color_start_time', 'FLOAT', props.color_start_time)
+        ensure_prop('ps_color_end_time',   'FLOAT', props.color_end_time)
+
+        # Alpha over lifetime
+        ensure_prop('ps_enable_alpha', 'BOOL',  props.enable_alpha)
+        ensure_prop('ps_start_alpha', 'FLOAT', props.start_alpha)
+
+        # create per-emitter template and store its name
         if props.particle_type == 'BILLBOARD':
             bb_name = self._ensure_billboard_template(context, init_obj)
             # Store the unique template name so the runtime knows which plane to use
@@ -1683,7 +1887,7 @@ init()
         if not added:
             self.report({'WARNING'}, "Particle system already fully initialized, nothing to add!")
         else:
-            # Summarise what was added
+            # Summarise what was added - group props together for a clean message
             logic_parts = [x for x in added if not x.startswith("prop:")]
             new_props = [x for x in added if x.startswith("prop:")]
             summary = logic_parts[:]
@@ -1693,11 +1897,116 @@ init()
         return {'FINISHED'}
 
 # Registration
+class PARTICLE_OT_apply_material(bpy.types.Operator):
+    """Build or rebuild the particle material based on current settings.
+    Works for both Billboard (applies to the PS_BP_ plane) and Mesh (applies to the particle mesh).
+    Always rebuilds from scratch so there are no leftover nodes from previous configurations."""
+    bl_idname = "particle.apply_material"
+    bl_label  = "Apply Material"
+
+    @staticmethod
+    def _build_nodes(mat, ps):
+        """Clear and rebuild the node tree based on ps settings."""
+        mat.use_nodes = True
+        mat.blend_method = 'BLEND'
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+
+        use_tex   = ps.enable_texture
+        use_color = ps.enable_color
+        use_alpha = ps.enable_alpha
+
+        # Always need BSDF + Output
+        out  = nodes.new('ShaderNodeOutputMaterial'); out.location  = (600, 0)
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location = (300, 0)
+        links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
+
+        # Object Info — needed for color and/or alpha
+        obj_inf = None
+        if use_color or use_alpha or use_tex:
+            obj_inf = nodes.new('ShaderNodeObjectInfo'); obj_inf.location = (-250, -150)
+
+        if use_tex:
+            # Full texture chain: UV → Image Texture × Object Info → BSDF
+            tex_co  = nodes.new('ShaderNodeTexCoord'); tex_co.location  = (-500, 150)
+            img_tex = nodes.new('ShaderNodeTexImage'); img_tex.location = (-250, 150)
+            links.new(tex_co.outputs['UV'], img_tex.inputs['Vector'])
+
+            if ps.billboard_texture:
+                img_tex.image = ps.billboard_texture
+
+            if use_color:
+                # Multiply texture color × object color
+                mix_col = nodes.new('ShaderNodeMixRGB'); mix_col.location = (50, 150)
+                mix_col.blend_type = 'MULTIPLY'
+                mix_col.inputs['Fac'].default_value = 1.0
+                links.new(img_tex.outputs['Color'],  mix_col.inputs['Color1'])
+                links.new(obj_inf.outputs['Color'],  mix_col.inputs['Color2'])
+                links.new(mix_col.outputs['Color'],  bsdf.inputs['Base Color'])
+            else:
+                links.new(img_tex.outputs['Color'], bsdf.inputs['Base Color'])
+
+            if use_alpha:
+                # Multiply texture alpha × object alpha
+                math_a = nodes.new('ShaderNodeMath'); math_a.location = (50, -50)
+                math_a.operation = 'MULTIPLY'
+                links.new(img_tex.outputs['Alpha'],   math_a.inputs[0])
+                links.new(obj_inf.outputs['Alpha'],   math_a.inputs[1])
+                links.new(math_a.outputs['Value'],    bsdf.inputs['Alpha'])
+            else:
+                links.new(img_tex.outputs['Alpha'], bsdf.inputs['Alpha'])
+
+        else:
+            # Color-only path — no texture nodes, no transparency artifacts
+            if use_color:
+                links.new(obj_inf.outputs['Color'], bsdf.inputs['Base Color'])
+            if use_alpha:
+                links.new(obj_inf.outputs['Alpha'], bsdf.inputs['Alpha'])
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object")
+            return {'CANCELLED'}
+
+        ps = obj.particle_system_props
+
+        if ps.particle_type == 'BILLBOARD':
+            bb_name = f"PS_BP_{obj.name}"
+            target  = bpy.data.objects.get(bb_name)
+            if not target:
+                self.report({'ERROR'}, f"Billboard plane '{bb_name}' not found — run Initialize first")
+                return {'CANCELLED'}
+            mat_name = f"PS_BillboardMat_{obj.name}"
+        else:
+            target = ps.particle_mesh
+            if not target:
+                self.report({'ERROR'}, "No particle mesh assigned")
+                return {'CANCELLED'}
+            mat_name = f"PS_Mat_{obj.name}"
+
+        # Get or create the material
+        mat = bpy.data.materials.get(mat_name)
+        if mat is None:
+            mat = bpy.data.materials.new(name=mat_name)
+        if not target.data.materials:
+            target.data.materials.append(mat)
+        else:
+            target.data.materials[0] = mat
+
+        self._build_nodes(mat, ps)
+
+        self.report({'INFO'}, f"Material '{mat_name}' applied to '{target.name}'")
+        return {'FINISHED'}
+
+
 classes = (
     ParticleSystemProperties,
     PARTICLE_PT_upbge_panel,
     PARTICLE_OT_preview_toggle,
     PARTICLE_OT_setup_logic,
+    PARTICLE_OT_apply_material,
 )
 
 def register():
