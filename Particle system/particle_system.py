@@ -236,6 +236,29 @@ def update_game_prop(self, context):
         'color_end_time': 'ps_color_end_time',
         'enable_color': 'ps_enable_color',
         'enable_alpha': 'ps_enable_alpha',
+        'enable_lod':               'ps_enable_lod',
+        'lod_start_distance':       'ps_lod_start',
+        'lod1_distance':            'ps_lod1_dist',
+        'lod1_max_particles':       'ps_lod1_max',
+        'lod1_emission_rate':       'ps_lod1_rate',
+        'lod1_burst_count':         'ps_lod1_burst',
+        'lod1_disable_collision':   'ps_lod1_no_coll',
+        'lod1_disable_emitting':    'ps_lod1_no_emit',
+        'lod1_destroy_particles':   'ps_lod1_destroy',
+        'lod2_distance':            'ps_lod2_dist',
+        'lod2_max_particles':       'ps_lod2_max',
+        'lod2_emission_rate':       'ps_lod2_rate',
+        'lod2_burst_count':         'ps_lod2_burst',
+        'lod2_disable_collision':   'ps_lod2_no_coll',
+        'lod2_disable_emitting':    'ps_lod2_no_emit',
+        'lod2_destroy_particles':   'ps_lod2_destroy',
+        'lod3_distance':            'ps_lod3_dist',
+        'lod3_max_particles':       'ps_lod3_max',
+        'lod3_emission_rate':       'ps_lod3_rate',
+        'lod3_burst_count':         'ps_lod3_burst',
+        'lod3_disable_collision':   'ps_lod3_no_coll',
+        'lod3_disable_emitting':    'ps_lod3_no_emit',
+        'lod3_destroy_particles':   'ps_lod3_destroy',
     }
     
     for addon_prop, game_prop in props_map.items():
@@ -537,12 +560,145 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    # LOD Properties
+    enable_lod: bpy.props.BoolProperty(
+        name="Enable LOD",
+        description="Enable Level of Detail — reduces simulation cost at distance",
+        default=False,
+        update=update_game_prop
+    )
+
+    lod_start_distance: bpy.props.FloatProperty(
+        name="Start LOD",
+        description="Distance from the active camera at which LOD begins. Below this = full simulation",
+        default=20.0, min=0.0, max=10000.0,
+        update=update_game_prop
+    )
+
+    # LOD 1
+    lod1_distance: bpy.props.FloatProperty(
+        name="Distance",
+        description="Distance at which LOD 1 activates",
+        default=40.0, min=0.0, max=10000.0,
+        update=update_game_prop
+    )
+    lod1_max_particles: bpy.props.IntProperty(
+        name="Max Particles",
+        description="Maximum active particles at LOD 1 (uses a portion of the main pool)",
+        default=50, min=0, max=5000,
+        update=update_game_prop
+    )
+    lod1_emission_rate: bpy.props.FloatProperty(
+        name="Emission Rate",
+        description="Particles per second at LOD 1 (Continuous mode)",
+        default=10.0, min=0.0, max=1000.0,
+        update=update_game_prop
+    )
+    lod1_burst_count: bpy.props.IntProperty(
+        name="Burst Count",
+        description="Particles per burst at LOD 1 (Burst mode)",
+        default=15, min=0, max=1500,
+        update=update_game_prop
+    )
+    lod1_disable_collision: bpy.props.BoolProperty(
+        name="Disable Collision",
+        default=False, update=update_game_prop
+    )
+    lod1_disable_emitting: bpy.props.BoolProperty(
+        name="Disable Emitting",
+        default=False, update=update_game_prop
+    )
+    lod1_destroy_particles: bpy.props.BoolProperty(
+        name="Destroy Particles",
+        description="Return all active particles to the pool immediately when this LOD activates",
+        default=False, update=update_game_prop
+    )
+
+    # LOD 2
+    lod2_distance: bpy.props.FloatProperty(
+        name="Distance",
+        description="Distance at which LOD 2 activates",
+        default=80.0, min=0.0, max=10000.0,
+        update=update_game_prop
+    )
+    lod2_max_particles: bpy.props.IntProperty(
+        name="Max Particles",
+        description="Maximum active particles at LOD 2 (uses a portion of the main pool)",
+        default=20, min=0, max=5000,
+        update=update_game_prop
+    )
+    lod2_emission_rate: bpy.props.FloatProperty(
+        name="Emission Rate",
+        description="Particles per second at LOD 2 (Continuous mode)",
+        default=5.0, min=0.0, max=1000.0,
+        update=update_game_prop
+    )
+    lod2_burst_count: bpy.props.IntProperty(
+        name="Burst Count",
+        description="Particles per burst at LOD 2 (Burst mode)",
+        default=8, min=0, max=1500,
+        update=update_game_prop
+    )
+    lod2_disable_collision: bpy.props.BoolProperty(
+        name="Disable Collision",
+        default=True, update=update_game_prop
+    )
+    lod2_disable_emitting: bpy.props.BoolProperty(
+        name="Disable Emitting",
+        default=False, update=update_game_prop
+    )
+    lod2_destroy_particles: bpy.props.BoolProperty(
+        name="Destroy Particles",
+        description="Return all active particles to the pool immediately when this LOD activates",
+        default=False, update=update_game_prop
+    )
+
+    # LOD 3
+    lod3_distance: bpy.props.FloatProperty(
+        name="Distance",
+        description="Distance at which LOD 3 activates",
+        default=150.0, min=0.0, max=10000.0,
+        update=update_game_prop
+    )
+    lod3_max_particles: bpy.props.IntProperty(
+        name="Max Particles",
+        description="Maximum active particles at LOD 3 (uses a portion of the main pool)",
+        default=5, min=0, max=5000,
+        update=update_game_prop
+    )
+    lod3_emission_rate: bpy.props.FloatProperty(
+        name="Emission Rate",
+        description="Particles per second at LOD 3 (Continuous mode)",
+        default=1.0, min=0.0, max=1000.0,
+        update=update_game_prop
+    )
+    lod3_burst_count: bpy.props.IntProperty(
+        name="Burst Count",
+        description="Particles per burst at LOD 3 (Burst mode)",
+        default=3, min=0, max=1500,
+        update=update_game_prop
+    )
+    lod3_disable_collision: bpy.props.BoolProperty(
+        name="Disable Collision",
+        default=True, update=update_game_prop
+    )
+    lod3_disable_emitting: bpy.props.BoolProperty(
+        name="Disable Emitting",
+        default=True, update=update_game_prop
+    )
+    lod3_destroy_particles: bpy.props.BoolProperty(
+        name="Destroy Particles",
+        description="Return all active particles to the pool immediately when this LOD activates",
+        default=True, update=update_game_prop
+    )
+
     # Preview mode property
     preview_active: bpy.props.BoolProperty(
         name="Preview Active",
         description="Internal property to track preview state",
         default=False
     )
+
 
 
 # Particle System Panel
@@ -676,9 +832,11 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.separator()
             box.operator("particle.apply_material", text="Apply Material", icon='NODE_MATERIAL')
 
+
             # Physics
             box = layout.box()
             box.label(text="Physics:")
+
             box.prop(ps, "simulation_space", text="Space")
             box.prop(ps, "movement_type", text="Movement")
             
@@ -703,6 +861,59 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.prop(ps, "enable_collision", text="Enable Collision")
             if ps.enable_collision:
                 box.prop(ps, "bounce_strength", slider=True)
+
+            # Render / LOD box
+            box = layout.box()
+            box.label(text="Render:")
+            box.prop(ps, "enable_lod", text="Enable LOD")
+
+            if ps.enable_lod:
+                # LOD 0 — Full simulation, distance controlled by start slider
+                lod0_box = box.box()
+                lod0_box.label(text="LOD 0 — Full Simulation")
+                lod0_box.prop(ps, "lod_start_distance", text="Start LOD")
+
+                # LOD 1
+                lod1_box = box.box()
+                lod1_box.label(text="LOD 1")
+                lod1_box.prop(ps, "lod1_distance", text="Distance")
+                lod1_box.prop(ps, "lod1_max_particles", text="Max Particles")
+                if ps.emission_mode == 'BURST':
+                    lod1_box.prop(ps, "lod1_burst_count", text="Burst Count")
+                else:
+                    lod1_box.prop(ps, "lod1_emission_rate", text="Emission Rate")
+                lod1_box.prop(ps, "lod1_disable_collision", text="Disable Collision")
+                lod1_box.prop(ps, "lod1_disable_emitting",  text="Disable Emitting")
+                if ps.lod1_disable_emitting:
+                    lod1_box.prop(ps, "lod1_destroy_particles", text="Destroy Particles")
+
+                # LOD 2
+                lod2_box = box.box()
+                lod2_box.label(text="LOD 2")
+                lod2_box.prop(ps, "lod2_distance", text="Distance")
+                lod2_box.prop(ps, "lod2_max_particles", text="Max Particles")
+                if ps.emission_mode == 'BURST':
+                    lod2_box.prop(ps, "lod2_burst_count", text="Burst Count")
+                else:
+                    lod2_box.prop(ps, "lod2_emission_rate", text="Emission Rate")
+                lod2_box.prop(ps, "lod2_disable_collision", text="Disable Collision")
+                lod2_box.prop(ps, "lod2_disable_emitting",  text="Disable Emitting")
+                if ps.lod2_disable_emitting:
+                    lod2_box.prop(ps, "lod2_destroy_particles", text="Destroy Particles")
+
+                # LOD 3
+                lod3_box = box.box()
+                lod3_box.label(text="LOD 3")
+                lod3_box.prop(ps, "lod3_distance", text="Distance")
+                lod3_box.prop(ps, "lod3_max_particles", text="Max Particles")
+                if ps.emission_mode == 'BURST':
+                    lod3_box.prop(ps, "lod3_burst_count", text="Burst Count")
+                else:
+                    lod3_box.prop(ps, "lod3_emission_rate", text="Emission Rate")
+                lod3_box.prop(ps, "lod3_disable_collision", text="Disable Collision")
+                lod3_box.prop(ps, "lod3_disable_emitting",  text="Disable Emitting")
+                if ps.lod3_disable_emitting:
+                    lod3_box.prop(ps, "lod3_destroy_particles", text="Destroy Particles")
 
 class PARTICLE_OT_preview_toggle(bpy.types.Operator):
     """Toggle viewport particle preview"""
@@ -786,7 +997,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
             to_remove = []
             for i, particle_data in enumerate(self._particles):
-                particle_obj, age, lifetime, start_size, end_size, velocity, angular_velocity, rotation, is_billboard = particle_data
+                particle_obj, age, lifetime, start_size, end_size, velocity, angular_velocity, rotation, is_billboard, col_start, col_end, col_t0, col_t1, p_start_alpha = particle_data
                 age += dt
 
                 if age >= lifetime:
@@ -818,6 +1029,24 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                 size = start_size + (end_size - start_size) * life_ratio
                 particle_obj.scale = Vector((size, size, size))
 
+                # Color over lifetime
+                if ps.enable_color or ps.enable_alpha:
+                    if ps.enable_color:
+                        t = (life_ratio - col_t0) / max(col_t1 - col_t0, 0.0001)
+                        t = max(0.0, min(1.0, t))
+                        cr = col_start[0] + (col_end[0] - col_start[0]) * t
+                        cg = col_start[1] + (col_end[1] - col_start[1]) * t
+                        cb = col_start[2] + (col_end[2] - col_start[2]) * t
+                    else:
+                        cr, cg, cb = 1.0, 1.0, 1.0
+
+                    if ps.enable_alpha and p_start_alpha > 0.0:
+                        ca = p_start_alpha * ((1.0 - life_ratio) ** (1.0 / p_start_alpha))
+                    else:
+                        ca = 1.0
+
+                    particle_obj.color = (cr, cg, cb, ca)
+
                 # Billboard: per-particle look-at toward the viewport eye.
                 # position, build a full orthonormal XYZ basis, apply as matrix.
                 if is_billboard:
@@ -826,17 +1055,21 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                             rv3d = area.spaces.active.region_3d
                             if rv3d:
                                 from mathutils import Matrix as _Mat
-                                eye    = rv3d.view_matrix.inverted().translation
-                                to_cam = (eye - particle_obj.location).normalized()
+                                eye     = rv3d.view_matrix.inverted().translation
+                                to_cam  = (eye - particle_obj.location).normalized()
                                 world_z = Vector((0.0, 0.0, 1.0))
-                                ref    = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(world_z)) > 0.999 else world_z
-                                right  = ref.cross(to_cam).normalized()
-                                up     = to_cam.cross(right).normalized()
-                                # Column-major: col0=right(X), col1=to_cam(Y), col2=up(Z)
+                                # Gimbal guard: if to_cam nearly parallel to Z use Y as up ref
+                                world_up = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(world_z)) > 0.999 else world_z
+                                # right = up_ref × to_cam  (X axis of billboard)
+                                right   = world_up.cross(to_cam).normalized()
+                                # up = to_cam × right  (Z axis of billboard, true up)
+                                up      = to_cam.cross(right).normalized()
+                                # Build column-major rotation matrix:
+                                # col0=right(X), col1=to_cam(Y, faces camera), col2=up(Z)
                                 rot_mat = _Mat((
-                                    (right.x, to_cam.x, up.x),
-                                    (right.y, to_cam.y, up.y),
-                                    (right.z, to_cam.z, up.z),
+                                    (right.x,  to_cam.x,  up.x),
+                                    (right.y,  to_cam.y,  up.y),
+                                    (right.z,  to_cam.z,  up.z),
                                 ))
                                 particle_obj.rotation_euler = rot_mat.to_euler()
                             break
@@ -863,7 +1096,8 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                         rotation = (rx, ry, rz)
 
                 self._particles[i] = (particle_obj, age, lifetime, start_size, end_size,
-                                      velocity, angular_velocity, rotation, is_billboard)
+                                      velocity, angular_velocity, rotation, is_billboard,
+                                      col_start, col_end, col_t0, col_t1, p_start_alpha)
 
             # Remove dead particles
             for i in reversed(to_remove):
@@ -989,9 +1223,28 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         # Calculate lifetime
         lifetime = ps.lifetime * (1.0 + (random.random() - 0.5) * ps.lifetime_random)
 
-        # Store: (obj, age, lifetime, start_size, end_size, velocity, angular_velocity, rotation, is_billboard)
+        # Capture color/alpha settings at spawn time so they stay consistent
+        # even if the user changes panel values mid-preview
+        p_col_start   = tuple(ps.color_start) if ps.enable_color else (1.0, 1.0, 1.0)
+        p_col_end     = tuple(ps.color_end)   if ps.enable_color else (1.0, 1.0, 1.0)
+        p_col_t0      = (ps.color_start_time / 10.0) if ps.enable_color else 0.0
+        p_col_t1      = max(ps.color_end_time / 10.0, p_col_t0 + 0.0001) if ps.enable_color else 1.0
+        p_start_alpha = ps.start_alpha if ps.enable_alpha else 0.0
+
+        # Assign the billboard material so colors/textures show in viewport
+        if is_billboard:
+            mat_name = f"PS_BillboardMat_{obj.name}"
+            mat_data = bpy.data.materials.get(mat_name)
+            if mat_data and not particle_obj.data.materials:
+                particle_obj.data.materials.append(mat_data)
+            elif mat_data and particle_obj.data.materials:
+                particle_obj.data.materials[0] = mat_data
+
+        # Store: (obj, age, lifetime, start_size, end_size, velocity, angular_velocity, rotation,
+        #         is_billboard, col_start, col_end, col_t0, col_t1, start_alpha)
         self._particles.append((particle_obj, 0.0, lifetime, ps.start_size, ps.end_size,
-                                velocity, Vector((0.0, 0.0, 0.0)), (0.0, 0.0, 0.0), is_billboard))
+                                velocity, Vector((0.0, 0.0, 0.0)), (0.0, 0.0, 0.0), is_billboard,
+                                p_col_start, p_col_end, p_col_t0, p_col_t1, p_start_alpha))
     
     def execute(self, context):
         obj = context.object
@@ -1204,6 +1457,7 @@ class ParticleSystem:
         self._prev_mesh       = ''
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
         self._is_billboard    = False
+        self._lod_level       = 0    # Current active LOD level (0 = full sim)
         self.load_properties()
         self.create_particle_template()
         self.initialize_pool()
@@ -1268,6 +1522,29 @@ class ParticleSystem:
             g('ps_start_alpha',         1.0),    # 49
             g('ps_enable_color',        False),  # 50
             g('ps_enable_alpha',        False),  # 51
+            g('ps_enable_lod',          False),  # 52
+            g('ps_lod_start',           20.0),   # 53
+            g('ps_lod1_dist',           40.0),   # 54
+            g('ps_lod1_max',            50),     # 55
+            g('ps_lod1_rate',           10.0),   # 56
+            g('ps_lod1_burst',          15),     # 57
+            g('ps_lod1_no_coll',        False),  # 58
+            g('ps_lod1_no_emit',        False),  # 59
+            g('ps_lod1_destroy',        False),  # 60
+            g('ps_lod2_dist',           80.0),   # 61
+            g('ps_lod2_max',            20),     # 62
+            g('ps_lod2_rate',           5.0),    # 63
+            g('ps_lod2_burst',          8),      # 64
+            g('ps_lod2_no_coll',        True),   # 65
+            g('ps_lod2_no_emit',        False),  # 66
+            g('ps_lod2_destroy',        False),  # 67
+            g('ps_lod3_dist',           150.0),  # 68
+            g('ps_lod3_max',            5),      # 69
+            g('ps_lod3_rate',           1.0),    # 70
+            g('ps_lod3_burst',          3),      # 71
+            g('ps_lod3_no_coll',        True),   # 72
+            g('ps_lod3_no_emit',        True),   # 73
+            g('ps_lod3_destroy',        True),   # 74
         )
 
     def _build_props_from_raw(self, r):
@@ -1310,6 +1587,29 @@ class ParticleSystem:
             'start_alpha':            r[49],
             'enable_color':           r[50],
             'enable_alpha':           r[51],
+            'enable_lod':             r[52],
+            'lod_start':              r[53],
+            'lod1_dist':              r[54],
+            'lod1_max':               r[55],
+            'lod1_rate':              r[56],
+            'lod1_burst':             r[57],
+            'lod1_no_coll':           r[58],
+            'lod1_no_emit':           r[59],
+            'lod1_destroy':           r[60],
+            'lod2_dist':              r[61],
+            'lod2_max':               r[62],
+            'lod2_rate':              r[63],
+            'lod2_burst':             r[64],
+            'lod2_no_coll':           r[65],
+            'lod2_no_emit':           r[66],
+            'lod2_destroy':           r[67],
+            'lod3_dist':              r[68],
+            'lod3_max':               r[69],
+            'lod3_rate':              r[70],
+            'lod3_burst':             r[71],
+            'lod3_no_coll':           r[72],
+            'lod3_no_emit':           r[73],
+            'lod3_destroy':           r[74],
         }
 
     def load_properties(self):
@@ -1395,6 +1695,19 @@ class ParticleSystem:
         # Alpha over lifetime
         self._enable_alpha     = p['enable_alpha']
         self._start_alpha      = p['start_alpha']
+
+        # LOD settings — cache the full table once per props change
+        self._lod_enabled  = p['enable_lod']
+        self._lod_start    = p['lod_start']
+        self._lod_table    = (
+            # (dist, max_p, rate, burst, no_coll, no_emit, destroy)
+            (p['lod1_dist'], p['lod1_max'], p['lod1_rate'], p['lod1_burst'],
+             p['lod1_no_coll'], p['lod1_no_emit'], p['lod1_destroy']),
+            (p['lod2_dist'], p['lod2_max'], p['lod2_rate'], p['lod2_burst'],
+             p['lod2_no_coll'], p['lod2_no_emit'], p['lod2_destroy']),
+            (p['lod3_dist'], p['lod3_max'], p['lod3_rate'], p['lod3_burst'],
+             p['lod3_no_coll'], p['lod3_no_emit'], p['lod3_destroy']),
+        )
 
     # ------------------------------------------------------------------
     # Pool management
@@ -1534,6 +1847,13 @@ class ParticleSystem:
         for _ in range(self.props['burst_count']):
             self.emit_particle()
 
+    def _emit_burst_lod(self, burst_count, max_particles):
+        active_count = len(self.particle_pool) - len(self.inactive_stack)
+        slots_free   = max(0, max_particles - active_count)
+        count        = min(burst_count, slots_free)
+        for _ in range(count):
+            self.emit_particle()
+
     # ------------------------------------------------------------------
     # Main update
     # ------------------------------------------------------------------
@@ -1563,24 +1883,64 @@ class ParticleSystem:
 
         props = self.props
 
-        # Spawn logic
-        if props['enabled']:
+        # ── LOD evaluation ─────────────────────────────────────────
+        # Runs once per update() — O(1) distance check against active camera.
+        lod_max_particles = props['max_particles']   # default: main setting
+        lod_emission_rate = props['emission_rate']
+        lod_burst_count   = props['burst_count']
+        lod_no_coll       = False
+        lod_no_emit       = False
+        lod_destroy       = False
+        prev_lod_level    = self._lod_level
+
+        if self._lod_enabled:
+            scene = logic.getCurrentScene()
+            cam   = scene.active_camera
+            if cam:
+                dist = (self.emitter.worldPosition - cam.worldPosition).length
+                if dist <= self._lod_start:
+                    self._lod_level = 0
+                else:
+                    self._lod_level = 0
+                    for lvl_idx, (lvl_dist, lvl_max, lvl_rate, lvl_burst,
+                                  lvl_ncoll, lvl_ne, lvl_destroy) in enumerate(self._lod_table):
+                        if dist >= lvl_dist:
+                            self._lod_level   = lvl_idx + 1
+                            lod_max_particles = lvl_max
+                            lod_emission_rate = lvl_rate
+                            lod_burst_count   = lvl_burst
+                            lod_no_coll       = lvl_ncoll
+                            lod_no_emit       = lvl_ne
+                            lod_destroy       = lvl_destroy
+
+            # Destroy particles when entering a new LOD level that requests it
+            if lod_destroy and self._lod_level != prev_lod_level:
+                for p in self.particle_pool:
+                    if p.is_active:
+                        self.deactivate_particle(p)
+        # ── end LOD ────────────────────────────────────────────────
+
+        # Spawn logic — LOD overrides max_particles, rate and burst_count
+        if props['enabled'] and not lod_no_emit:
             mode    = props['emission_mode']
             trigger = props['trigger']
 
             if mode == 'CONTINUOUS':
                 if trigger:
                     self.time_since_emit += dt
-                    rate = props['emission_rate']
+                    rate = lod_emission_rate
                     interval = 1.0 / rate if rate > 0 else float('inf')
                     while self.time_since_emit >= interval:
-                        self.emit_particle()
+                        # Respect LOD max_particles soft cap
+                        active_count = len(self.particle_pool) - len(self.inactive_stack)
+                        if active_count < lod_max_particles:
+                            self.emit_particle()
                         self.time_since_emit -= interval
 
             elif mode == 'BURST':
                 if props['is_one_shot']:
                     if trigger and not self.burst_triggered:
-                        self.emit_burst()
+                        self._emit_burst_lod(lod_burst_count, lod_max_particles)
                         self.burst_triggered = True
                     elif not trigger:
                         self.burst_triggered = False
@@ -1588,14 +1948,14 @@ class ParticleSystem:
                     if trigger:
                         self.time_since_emit += dt
                         if self.time_since_emit >= props['emission_delay']:
-                            self.emit_burst()
+                            self._emit_burst_lod(lod_burst_count, lod_max_particles)
                             self.time_since_emit = 0.0
 
         # --- Particle update loop (hot path) ---
         acc              = self._acc
         is_force         = self._is_force
         damping_factor   = self._damping_factor
-        enable_collision = self._enable_collision
+        enable_collision = self._enable_collision and not lod_no_coll
         bounce           = self._bounce
         size_start       = self._size_start
         size_delta       = self._size_delta
@@ -1617,7 +1977,7 @@ class ParticleSystem:
             _scene = logic.getCurrentScene()
             bb_cam = _scene.active_camera
 
-        # Color & alpha locals
+        # Color & alpha locals — LOD overrides applied on top
         enable_color  = self._enable_color
         enable_alpha  = self._enable_alpha
         color_start   = self._color_start
@@ -1734,7 +2094,7 @@ class ParticleManager:
         self.systems = {}
         self.last_time = 0.0
         print("="*60)
-        print("PARTICLE SYSTEM v0.8.0 - OBJECT POOLING")
+        print("PARTICLE SYSTEM v0.7.1 - OBJECT POOLING")
         print("="*60)
     
     def scan(self):
@@ -1872,6 +2232,31 @@ init()
         # Alpha over lifetime
         ensure_prop('ps_enable_alpha', 'BOOL',  props.enable_alpha)
         ensure_prop('ps_start_alpha', 'FLOAT', props.start_alpha)
+
+        # LOD
+        ensure_prop('ps_enable_lod',      'BOOL',  props.enable_lod)
+        ensure_prop('ps_lod_start',       'FLOAT', props.lod_start_distance)
+        ensure_prop('ps_lod1_dist',       'FLOAT', props.lod1_distance)
+        ensure_prop('ps_lod1_max',        'INT',   props.lod1_max_particles)
+        ensure_prop('ps_lod1_rate',       'FLOAT', props.lod1_emission_rate)
+        ensure_prop('ps_lod1_burst',      'INT',   props.lod1_burst_count)
+        ensure_prop('ps_lod1_no_coll',    'BOOL',  props.lod1_disable_collision)
+        ensure_prop('ps_lod1_no_emit',    'BOOL',  props.lod1_disable_emitting)
+        ensure_prop('ps_lod1_destroy',    'BOOL',  props.lod1_destroy_particles)
+        ensure_prop('ps_lod2_dist',       'FLOAT', props.lod2_distance)
+        ensure_prop('ps_lod2_max',        'INT',   props.lod2_max_particles)
+        ensure_prop('ps_lod2_rate',       'FLOAT', props.lod2_emission_rate)
+        ensure_prop('ps_lod2_burst',      'INT',   props.lod2_burst_count)
+        ensure_prop('ps_lod2_no_coll',    'BOOL',  props.lod2_disable_collision)
+        ensure_prop('ps_lod2_no_emit',    'BOOL',  props.lod2_disable_emitting)
+        ensure_prop('ps_lod2_destroy',    'BOOL',  props.lod2_destroy_particles)
+        ensure_prop('ps_lod3_dist',       'FLOAT', props.lod3_distance)
+        ensure_prop('ps_lod3_max',        'INT',   props.lod3_max_particles)
+        ensure_prop('ps_lod3_rate',       'FLOAT', props.lod3_emission_rate)
+        ensure_prop('ps_lod3_burst',      'INT',   props.lod3_burst_count)
+        ensure_prop('ps_lod3_no_coll',    'BOOL',  props.lod3_disable_collision)
+        ensure_prop('ps_lod3_no_emit',    'BOOL',  props.lod3_disable_emitting)
+        ensure_prop('ps_lod3_destroy',    'BOOL',  props.lod3_destroy_particles)
 
         # create per-emitter template and store its name
         if props.particle_type == 'BILLBOARD':
