@@ -36,6 +36,7 @@ The performance is not great since the Add-on uses CPU, but to deliver the best 
 3. Change the physics properties to **No Collision** and uncheck **Sound Occluder**
 4. If you want to use textures i highly recommend to use *DDS* format
 5. Try using simple object geometry or reduce the **Emission Rate**
+6. Use LOD system to improve the performance 
 
 ## Documentation 
 Coming soon
