@@ -18,12 +18,12 @@ It's an addon design for UPBGE 0.5+ to create particle effects for your game wit
 
 ## Quick setup
 1. Add empty
-2. Go to physics
-3. Enable the option "Particle Emitter."
-4. Go to particle mesh and select any object you want
+2. Go to physics properties 
+3. Enable the option "Particle Emitter"
+4. Choose a particle type *Billboard* or *Mesh*
 5. Hide the object by selecting it and pressing H or clicking on the eye in the outliner
 6. Click on "Initialize"
-7. Check the "Emission trigger"
+7. Check the "Emission trigger" checkbox 
 8. Press P and enjoy!
 
 > [!TIP]
@@ -31,11 +31,11 @@ You can control the particle spawning with *Logic Brick* or *Logic nodes* by usi
 
 > [!WARNING]
 The performance is not great since the Add-on uses CPU, but to deliver the best performance, follow these steps:
-1. Select the object you want to use as a  particle
+1. Select the object you want to use as a particle
 2. Go to **object properties** and enable ***UPBGE Dupli Base***
 3. Change the physics properties to **No Collision** and uncheck **Sound Occluder**
 4. If you want to use textures i highly recommend to use *DDS* format
-5. Try using simple object geometry or reduce the **Emission Rate**
+5. Try using simple object geometry if you choose mesh or reduce the **Emission Rate**
 6. Use LOD system to improve the performance 
 
 ## Documentation 
