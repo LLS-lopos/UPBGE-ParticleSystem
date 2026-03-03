@@ -1,5 +1,5 @@
 # UPBGE Particle System
-It's an addon design for UPBGE 0.5+ to create particle effects for your game without doing it from scratch, and it creates withthe help of AI
+It's an addon design for UPBGE 0.5+ to create particle effects for your game without doing it from scratch, and it creates with the help of AI
 ## Features
 + Integrated directly into **The physics properties** for easy access
 + Two emission modes **continuous** and **burst**
