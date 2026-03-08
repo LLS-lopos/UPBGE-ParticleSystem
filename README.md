@@ -8,7 +8,8 @@ It's an addon design for UPBGE 0.5+ to create particle effects for your game wit
 + Controlling the system with an emission trigger for smart use by toggle **ps_tigger** bool property
 + Preview mode allows you to debug your particles in the viewport without starting the game
 + Emission shape opens more possibilities to create effects
-+ The system support color over lifetime, alpha and textures
++ The system support color over lifetime, alpha and textures and you can control them with a curve
++ Setup your shader with a few buttons
 
 ## Installation guide
 1. Download the addon 
@@ -34,9 +35,10 @@ The performance is not great since the Add-on uses CPU, but to deliver the best 
 1. Select the object you want to use as a particle
 2. Go to **object properties** and enable ***UPBGE Dupli Base***
 3. Change the physics properties to **No Collision** and uncheck **Sound Occluder**
-4. If you want to use textures i highly recommend to use *DDS* format
-5. Try using simple object geometry if you choose mesh or reduce the **Emission Rate**
-6. Use LOD system to improve the performance 
+4. If you want to use textures I highly recommend using the *DDS* format
+5. If you use mesh as particle try using simple object geometry if you choose mesh, or reduce the **Emission Rate**
+6. Use the LOD system
+7. Enable System launcher
 
 ## Documentation 
 Coming soon
