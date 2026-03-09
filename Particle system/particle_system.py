@@ -367,7 +367,7 @@ def get_alpha_curve_node(obj_name): return _get_curve_node(obj_name, 'AlphaCurve
 def get_size_curve_node(obj_name):  return _get_curve_node(obj_name, 'SizeCurve')
 
 def sample_color_curve(obj_name, n=16): return _sample_curve_node(get_color_curve_node(obj_name), n)
-def sample_alpha_curve(obj_name, n=16): return _sample_curve_node(get_alpha_curve_node(obj_name), n)
+def sample_alpha_curve(obj_name, n=64): return _sample_curve_node(get_alpha_curve_node(obj_name), n)
 def sample_size_curve(obj_name, n=16):  return _sample_curve_node(get_size_curve_node(obj_name), n)
 
 # ── Init operators ───────────────────────────────────────────────────────────
@@ -498,8 +498,8 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
 
     lifetime: bpy.props.FloatProperty(name="Lifetime", default=3.0, min=0.1, max=100.0, update=update_game_prop)
     lifetime_random: bpy.props.FloatProperty(name="Random Lifetime", default=0.5, min=0.0, max=1.0, update=update_game_prop)
-    start_size: bpy.props.FloatProperty(name="Start Size", default=0.1, min=0.001, max=10.0, update=update_game_prop)
-    end_size: bpy.props.FloatProperty(name="End Size", default=0.05, min=0.001, max=10.0, update=update_game_prop)
+    start_size: bpy.props.FloatProperty(name="Start Size", default=0.1, min=0.001, max=50.0, update=update_game_prop)
+    end_size: bpy.props.FloatProperty(name="End Size", default=0.05, min=0.001, max=50.0, update=update_game_prop)
 
     size_mode: bpy.props.EnumProperty(
         name="Size Mode",
@@ -1235,10 +1235,10 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.prop(ps, "enable_alpha", text="Alpha over Lifetime")
             if ps.enable_alpha:
                 box.prop(ps, "alpha_mode", text="Mode")
-                alpha_row = box.row(align=True)
-                alpha_row.prop(ps, "start_alpha", text="Start", slider=True)
-                alpha_row.prop(ps, "end_alpha",   text="End",   slider=True)
                 if ps.alpha_mode == 'SIMPLE':
+                    alpha_row = box.row(align=True)
+                    alpha_row.prop(ps, "start_alpha", text="Start", slider=True)
+                    alpha_row.prop(ps, "end_alpha",   text="End",   slider=True)
                     alpha_time_row = box.row(align=True)
                     alpha_time_row.prop(ps, "alpha_start_time", text="From")
                     alpha_time_row.prop(ps, "alpha_end_time",   text="To")
@@ -1343,12 +1343,12 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
 
             # Render / LOD box / System launcher
             box = layout.box()
-            box.label(text="Render:",  icon="MEMORY")
+            box.label(text="Render:",  icon="RESTRICT_RENDER_OFF")
             box.separator()
             box.prop(ps, "enable_launcher", text="System Launcher")
             if ps.enable_launcher:
                 sl_box = box.box()
-                sl_box.label(text="System Launcher", icon='CAMERA_DATA')
+                sl_box.label(text="System Launcher", icon='DRIVER_DISTANCE')
 
                 # Warn if prewarm <= active distance
                 if ps.enable_lod:
@@ -1588,12 +1588,15 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                         t_a = (life_ratio - p_alpha_t0) / (p_alpha_t1 - p_alpha_t0)
                         t_a = max(0.0, min(1.0, t_a))
                         if _preview_alpha_curve:
+                            # Curve mode: Y value IS the alpha
                             n1  = len(_preview_alpha_curve) - 1
                             idx = t_a * n1
                             lo  = int(idx)
                             hi  = min(lo + 1, n1)
-                            t_a = _preview_alpha_curve[lo] + (_preview_alpha_curve[hi] - _preview_alpha_curve[lo]) * (idx - lo)
-                        ca = p_start_alpha + (p_end_alpha - p_start_alpha) * t_a
+                            ca  = _preview_alpha_curve[lo] + (_preview_alpha_curve[hi] - _preview_alpha_curve[lo]) * (idx - lo)
+                            ca  = max(0.0, min(1.0, ca))
+                        else:
+                            ca = p_start_alpha + (p_end_alpha - p_start_alpha) * t_a
                     else:
                         ca = 1.0
 
@@ -1990,7 +1993,6 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             added.append("Controller")
         controller = existing_ctrl
 
-        # Runtime Script with OBJECT POOLING for performance
         script_text = """# UPBGE Particle System Runtime v0.9.0
 
 from bge import logic
@@ -3145,12 +3147,15 @@ class ParticleSystem:
                         t_a = (life_ratio - alpha_t_start) / (alpha_t_end - alpha_t_start)
                         t_a = max(0.0, min(1.0, t_a))
                         if alpha_curve:
-                            n1  = len(alpha_curve) - 1
-                            idx = t_a * n1
-                            lo  = int(idx)
-                            hi  = min(lo + 1, n1)
-                            t_a = alpha_curve[lo] + (alpha_curve[hi] - alpha_curve[lo]) * (idx - lo)
-                        alpha = start_alpha + (end_alpha - start_alpha) * t_a
+                            # Curve mode: Y value IS the alpha — X is lifetime (0→1)
+                            n1   = len(alpha_curve) - 1
+                            idx  = t_a * n1
+                            lo   = int(idx)
+                            hi   = min(lo + 1, n1)
+                            alpha = alpha_curve[lo] + (alpha_curve[hi] - alpha_curve[lo]) * (idx - lo)
+                            alpha = max(0.0, min(1.0, alpha))
+                        else:
+                            alpha = start_alpha + (end_alpha - start_alpha) * t_a
                     else:
                         alpha = 1.0
 
