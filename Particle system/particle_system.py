@@ -5,13 +5,16 @@ bl_info = {
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
     "description": "Particle system for UPBGE (NO GPU)",
-    "warning": "It is still an beta version and it is not stable at all times",
+    "warning": "This beta version sill under development and is not stable at all times",
     "wiki_url": "",
     "category": "Physics",
 }
 
 import bpy
-from mathutils import Vector
+import bmesh
+import math
+import time
+from mathutils import Vector, Matrix
 import random
 
 # Wire shape visualization
@@ -20,9 +23,9 @@ def update_wire_shape(self, context):
     obj = context.object
     if not obj:
         return
-    
+
     ps = obj.particle_system_props
-    
+
     # Wire names for each shape type
     wire_box_name    = f"PS_Wire_Box_{obj.name}"
     wire_sphere_name = f"PS_Wire_Sphere_{obj.name}"
@@ -43,11 +46,11 @@ def update_wire_shape(self, context):
                 w.hide_render   = True
         update_game_prop(self, context)
         return
-    
+
     # Create Box wire if it doesn't exist
     if not wire_box:
         wire_box = create_box_wire(obj, wire_box_name)
-    
+
     # Create Sphere wire if it doesn't exist
     if not wire_sphere:
         wire_sphere = create_sphere_wire(obj, wire_sphere_name)
@@ -66,384 +69,240 @@ def update_wire_shape(self, context):
             w.hide_viewport = True
             w.hide_render   = True
 
-    # Show/hide based on current shape
+    # Show/hide based on current shape — parent/location set permanently at creation
     if ps.emission_shape == 'BOX':
         _hide_all()
-        wire_box.parent = obj
-        wire_box.matrix_parent_inverse = obj.matrix_world.__class__()
-        wire_box.location      = (0, 0, 0)
-        wire_box.rotation_euler = (0, 0, 0)
+        wire_box.scale         = ps.emission_box_size
         wire_box.hide_viewport = False
         wire_box.hide_render   = True
-        wire_box.scale = ps.emission_box_size
 
     elif ps.emission_shape == 'SPHERE':
         _hide_all()
-        wire_sphere.parent = obj
-        wire_sphere.matrix_parent_inverse = obj.matrix_world.__class__()
-        wire_sphere.location      = (0, 0, 0)
-        wire_sphere.rotation_euler = (0, 0, 0)
+        r = ps.emission_sphere_radius
+        wire_sphere.scale         = (r, r, r)
         wire_sphere.hide_viewport = False
         wire_sphere.hide_render   = True
-        r = ps.emission_sphere_radius
-        wire_sphere.scale = (r, r, r)
 
     elif ps.emission_shape == 'CONE':
         _hide_all()
-        wire_cone.parent = obj
-        wire_cone.matrix_parent_inverse = obj.matrix_world.__class__()
-        wire_cone.location      = (0, 0, 0)
-        wire_cone.rotation_euler = (0, 0, 0)
+        wire_cone.scale         = (ps.emission_cone_radius, ps.emission_cone_radius, ps.emission_cone_height)
         wire_cone.hide_viewport = False
         wire_cone.hide_render   = True
-        r = ps.emission_cone_radius
-        h = ps.emission_cone_height
-        wire_cone.scale = (r, r, h)
 
     elif ps.emission_shape == 'RING':
         _hide_all()
-        wire_ring.parent = obj
-        wire_ring.matrix_parent_inverse = obj.matrix_world.__class__()
-        wire_ring.location      = (0, 0, 0)
-        wire_ring.rotation_euler = (0, 0, 0)
+        r = ps.emission_ring_radius
+        wire_ring.scale         = (r, r, 1.0)
         wire_ring.hide_viewport = False
         wire_ring.hide_render   = True
-        r = ps.emission_ring_radius
-        wire_ring.scale = (r, r, 1.0)
 
     update_game_prop(self, context)
 
+def _make_wire_obj(obj, wire_name, shape_type):
+    """Shared setup for all wire objects: link, parent, display flags.
+    Called once at creation; parent/location are permanent after this."""
+    mesh = bpy.data.meshes.new(f"PS_WireMesh_{shape_type}_{obj.name}")
+    w = bpy.data.objects.new(wire_name, mesh)
+    w['ps_shape_type'] = shape_type
+    bpy.context.collection.objects.link(w)
+    w.parent = obj
+    w.matrix_parent_inverse = obj.matrix_world.__class__()
+    w.location       = (0, 0, 0)
+    w.rotation_euler = (0, 0, 0)
+    w.display_type   = 'WIRE'
+    w.show_in_front  = True
+    w.hide_render    = True
+    w.hide_select    = True
+    w.hide_viewport  = True
+    w.color          = (0, 1, 1, 1)
+    return w
+
 def create_box_wire(obj, wire_name):
-    """Create box wire mesh (called once, reused forever)"""
-    import bmesh
-    
-    mesh = bpy.data.meshes.new(f"PS_WireMesh_Box_{obj.name}")
-    wire_obj = bpy.data.objects.new(wire_name, mesh)
-    
-    # Store shape type
-    wire_obj['ps_shape_type'] = 'BOX'
-    
-    # Link to collection
-    bpy.context.collection.objects.link(wire_obj)
-    
-    # Parent to emitter with identity inverse so wire is always at emitter's local origin
-    wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
-    
-    # Create bmesh (UNIT box)
+    """Unit box wire (±0.5 per axis). Scale=(box_size_x,y,z) at show time."""
+    w = _make_wire_obj(obj, wire_name, 'BOX')
     bm = bmesh.new()
-    
-    verts = [
-        bm.verts.new((-0.5, -0.5, -0.5)),
-        bm.verts.new((0.5, -0.5, -0.5)),
-        bm.verts.new((0.5, 0.5, -0.5)),
-        bm.verts.new((-0.5, 0.5, -0.5)),
-        bm.verts.new((-0.5, -0.5, 0.5)),
-        bm.verts.new((0.5, -0.5, 0.5)),
-        bm.verts.new((0.5, 0.5, 0.5)),
-        bm.verts.new((-0.5, 0.5, 0.5)),
-    ]
-    
-    edges = [
-        (0,1), (1,2), (2,3), (3,0),  # Bottom
-        (4,5), (5,6), (6,7), (7,4),  # Top
-        (0,4), (1,5), (2,6), (3,7),  # Vertical
-    ]
-    for e in edges:
-        bm.edges.new((verts[e[0]], verts[e[1]]))
-    
-    bm.to_mesh(mesh)
-    bm.free()
-    
-    # Display properties
-    wire_obj.display_type = 'WIRE'
-    wire_obj.show_in_front = True
-    wire_obj.hide_render = True
-    wire_obj.hide_select = True
-    wire_obj.color = (0, 1, 1, 1)
-    
-    return wire_obj
+    vs = [bm.verts.new(v) for v in (
+        (-0.5,-0.5,-0.5),(0.5,-0.5,-0.5),(0.5,0.5,-0.5),(-0.5,0.5,-0.5),
+        (-0.5,-0.5, 0.5),(0.5,-0.5, 0.5),(0.5,0.5, 0.5),(-0.5,0.5, 0.5),
+    )]
+    for a, b in ((0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)):
+        bm.edges.new((vs[a], vs[b]))
+    bm.to_mesh(w.data); bm.free()
+    return w
 
 def create_sphere_wire(obj, wire_name):
-    """Create sphere wire mesh (called once, reused forever)"""
-    import bmesh
-    import math
-    
-    mesh = bpy.data.meshes.new(f"PS_WireMesh_Sphere_{obj.name}")
-    wire_obj = bpy.data.objects.new(wire_name, mesh)
-    
-    # Store shape type
-    wire_obj['ps_shape_type'] = 'SPHERE'
-    
-    # Link to collection
-    bpy.context.collection.objects.link(wire_obj)
-    
-    # Parent to emitter with identity inverse so wire is always at emitter's local origin
-    wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
-    
-    # Create bmesh
+    """Three great-circle wire (XY, XZ, YZ). Scale=(r,r,r) at show time."""
+    w = _make_wire_obj(obj, wire_name, 'SPHERE')
     bm = bmesh.new()
-    segments = 32
-    
-    # XY circle
-    verts_xy = []
-    for i in range(segments):
-        angle = 2 * math.pi * i / segments
-        x = math.cos(angle)
-        y = math.sin(angle)
-        verts_xy.append(bm.verts.new((x, y, 0)))
-    
-    for i in range(segments):
-        bm.edges.new((verts_xy[i], verts_xy[(i+1) % segments]))
-    
-    # XZ circle
-    verts_xz = []
-    for i in range(segments):
-        angle = 2 * math.pi * i / segments
-        x = math.cos(angle)
-        z = math.sin(angle)
-        verts_xz.append(bm.verts.new((x, 0, z)))
-    
-    for i in range(segments):
-        bm.edges.new((verts_xz[i], verts_xz[(i+1) % segments]))
-    
-    # YZ circle
-    verts_yz = []
-    for i in range(segments):
-        angle = 2 * math.pi * i / segments
-        y = math.cos(angle)
-        z = math.sin(angle)
-        verts_yz.append(bm.verts.new((0, y, z)))
-    
-    for i in range(segments):
-        bm.edges.new((verts_yz[i], verts_yz[(i+1) % segments]))
-    
-    bm.to_mesh(mesh)
-    bm.free()
-    
-    # Display properties
-    wire_obj.display_type = 'WIRE'
-    wire_obj.show_in_front = True
-    wire_obj.hide_render = True
-    wire_obj.hide_select = True
-    wire_obj.color = (0, 1, 1, 1)
-    
-    return wire_obj
+    seg = 32; tau = 2.0 * math.pi
+    for plane in ('xy', 'xz', 'yz'):
+        vs = []
+        for i in range(seg):
+            a = tau * i / seg; c, s = math.cos(a), math.sin(a)
+            vs.append(bm.verts.new((c,s,0) if plane=='xy' else (c,0,s) if plane=='xz' else (0,c,s)))
+        for i in range(seg):
+            bm.edges.new((vs[i], vs[(i+1) % seg]))
+    bm.to_mesh(w.data); bm.free()
+    return w
 
 def create_cone_wire(obj, wire_name):
-    """Cone wire mesh — tip at origin (emitter), base ring opening upward at Z=+1.
-    Scaled by (radius, radius, height) so unit cone has radius=1, height=1."""
-    import bmesh
-    import math
-
-    mesh    = bpy.data.meshes.new(f"PS_WireMesh_Cone_{obj.name}")
-    wire_obj = bpy.data.objects.new(wire_name, mesh)
-    wire_obj['ps_shape_type'] = 'CONE'
-
-    bpy.context.collection.objects.link(wire_obj)
-    wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
-
-    bm = bmesh.new()
-    segments = 32
-
-    # Tip at origin (emitter point / bottom of cone)
-    tip = bm.verts.new((0.0, 0.0, 0.0))
-
-    # Base ring opening upward (Z = +1 in local space)
-    base_verts = []
-    for i in range(segments):
-        angle = 2.0 * math.pi * i / segments
-        base_verts.append(bm.verts.new((math.cos(angle), math.sin(angle), 1.0)))
-
-    # Base ring edges
-    for i in range(segments):
-        bm.edges.new((base_verts[i], base_verts[(i + 1) % segments]))
-
-    # Lines from tip to base (every 8th for clarity)
-    for i in range(0, segments, 8):
-        bm.edges.new((tip, base_verts[i]))
-
-    bm.to_mesh(mesh)
-    bm.free()
-
-    wire_obj.display_type = 'WIRE'
-    wire_obj.show_in_front = True
-    wire_obj.hide_render = True
-    wire_obj.hide_select = True
-    wire_obj.color = (0, 1, 1, 1)
-
-    return wire_obj
+    """Cone wire: tip at origin, unit base ring at Z=+1. Scale=(radius,radius,height)."""
+    w = _make_wire_obj(obj, wire_name, 'CONE')
+    bm = bmesh.new(); seg = 32; tau = 2.0 * math.pi
+    tip  = bm.verts.new((0.0, 0.0, 0.0))
+    base = [bm.verts.new((math.cos(tau*i/seg), math.sin(tau*i/seg), 1.0)) for i in range(seg)]
+    for i in range(seg):
+        bm.edges.new((base[i], base[(i+1) % seg]))
+    for i in range(0, seg, 8):
+        bm.edges.new((tip, base[i]))
+    bm.to_mesh(w.data); bm.free()
+    return w
 
 def create_ring_wire(obj, wire_name):
-    """Ring wire — a single circle of radius 1 in the XY plane.
-    Scaled by (ring_radius, ring_radius, 1) so it always matches the emitter."""
-    import bmesh
-    import math
+    """Unit circle in XY plane. Scale=(ring_radius,ring_radius,1) at show time."""
+    w = _make_wire_obj(obj, wire_name, 'RING')
+    bm = bmesh.new(); seg = 32; tau = 2.0 * math.pi
+    vs = [bm.verts.new((math.cos(tau*i/seg), math.sin(tau*i/seg), 0.0)) for i in range(seg)]
+    for i in range(seg):
+        bm.edges.new((vs[i], vs[(i+1) % seg]))
+    bm.to_mesh(w.data); bm.free()
+    return w
 
-    mesh     = bpy.data.meshes.new(f"PS_WireMesh_Ring_{obj.name}")
-    wire_obj = bpy.data.objects.new(wire_name, mesh)
-    wire_obj['ps_shape_type'] = 'RING'
-
-    bpy.context.collection.objects.link(wire_obj)
-    wire_obj.parent = obj
-    wire_obj.matrix_parent_inverse = obj.matrix_world.__class__()
-
-    bm       = bmesh.new()
-    segments = 32
-    verts    = []
-    for i in range(segments):
-        angle = 2.0 * math.pi * i / segments
-        verts.append(bm.verts.new((math.cos(angle), math.sin(angle), 0.0)))
-    for i in range(segments):
-        bm.edges.new((verts[i], verts[(i + 1) % segments]))
-    bm.to_mesh(mesh)
-    bm.free()
-
-    wire_obj.display_type  = 'WIRE'
-    wire_obj.show_in_front = True
-    wire_obj.hide_render   = True
-    wire_obj.hide_select   = True
-    wire_obj.color         = (0, 1, 1, 1)
-    return wire_obj
+_PROPS_MAP = (
+    ('enabled',                    'ps_enabled'),
+    ('trigger_enabled',                    'ps_trigger'),
+    ('emission_mode',                    'ps_emission_mode'),
+    ('emission_shape',                    'ps_emission_shape'),
+    ('emission_sphere_radius',                    'ps_emission_sphere_radius'),
+    ('emission_cone_radius',                    'ps_emission_cone_radius'),
+    ('emission_cone_height',                    'ps_emission_cone_height'),
+    ('emission_ring_radius',                    'ps_emission_ring_radius'),
+    ('emission_ring_width',                    'ps_emission_ring_width'),
+    ('max_particles',                    'ps_max_particles'),
+    ('emission_rate',                    'ps_emission_rate'),
+    ('emission_delay',                    'ps_emission_delay'),
+    ('burst_count',                    'ps_burst_count'),
+    ('is_one_shot',                    'ps_is_one_shot'),
+    ('lifetime',                    'ps_lifetime'),
+    ('lifetime_random',                    'ps_lifetime_random'),
+    ('start_size',                    'ps_start_size'),
+    ('end_size',                    'ps_end_size'),
+    ('velocity_random',                    'ps_velocity_random'),
+    ('simulation_space',                    'ps_simulation_space'),
+    ('movement_type',                    'ps_movement_type'),
+    ('drag_enabled',                    'ps_drag_enabled'),
+    ('drag_start',                    'ps_drag_start'),
+    ('drag_end',                    'ps_drag_end'),
+    ('resistance_strength',                    'ps_resistance'),
+    ('billboard_roll_enabled',                    'ps_bb_roll_enabled'),
+    ('billboard_roll_speed',                    'ps_bb_roll_speed'),
+    ('billboard_roll_random',                    'ps_bb_roll_random'),
+    ('enable_gravity',                    'ps_enable_gravity'),
+    ('gravity_power',                    'ps_gravity_power'),
+    ('enable_collision',                    'ps_enable_collision'),
+    ('bounce_strength',                    'ps_bounce_strength'),
+    ('particle_type',                    'ps_particle_type'),
+    ('start_alpha',                    'ps_start_alpha'),
+    ('end_alpha',                    'ps_end_alpha'),
+    ('alpha_start_time',                    'ps_alpha_start_time'),
+    ('alpha_end_time',                    'ps_alpha_end_time'),
+    ('color_start_time',                    'ps_color_start_time'),
+    ('color_end_time',                    'ps_color_end_time'),
+    ('enable_color',                    'ps_enable_color'),
+    ('enable_alpha',                    'ps_enable_alpha'),
+    ('enable_turbulence',                    'ps_enable_turb'),
+    ('turbulence_strength',                    'ps_turb_strength'),
+    ('turbulence_frequency',                    'ps_turb_frequency'),
+    ('turbulence_speed',                    'ps_turb_speed'),
+    ('enable_lod',                    'ps_enable_lod'),
+    ('lod_start_distance',                    'ps_lod_start'),
+    ('lod1_distance',                    'ps_lod1_dist'),
+    ('lod1_max_particles',                    'ps_lod1_max'),
+    ('lod1_emission_rate',                    'ps_lod1_rate'),
+    ('lod1_burst_count',                    'ps_lod1_burst'),
+    ('lod1_disable_turbulence',                    'ps_lod1_no_turb'),
+    ('lod1_disable_collision',                    'ps_lod1_no_coll'),
+    ('lod1_disable_emitting',                    'ps_lod1_no_emit'),
+    ('lod1_destroy_particles',                    'ps_lod1_destroy'),
+    ('lod2_distance',                    'ps_lod2_dist'),
+    ('lod2_max_particles',                    'ps_lod2_max'),
+    ('lod2_emission_rate',                    'ps_lod2_rate'),
+    ('lod2_burst_count',                    'ps_lod2_burst'),
+    ('lod2_disable_turbulence',                    'ps_lod2_no_turb'),
+    ('lod2_disable_collision',                    'ps_lod2_no_coll'),
+    ('lod2_disable_emitting',                    'ps_lod2_no_emit'),
+    ('lod2_destroy_particles',                    'ps_lod2_destroy'),
+    ('lod3_distance',                    'ps_lod3_dist'),
+    ('lod3_max_particles',                    'ps_lod3_max'),
+    ('lod3_emission_rate',                    'ps_lod3_rate'),
+    ('lod3_burst_count',                    'ps_lod3_burst'),
+    ('lod3_disable_turbulence',                    'ps_lod3_no_turb'),
+    ('lod3_disable_collision',                    'ps_lod3_no_coll'),
+    ('lod3_disable_emitting',                    'ps_lod3_no_emit'),
+    ('lod3_destroy_particles',                    'ps_lod3_destroy'),
+    ('enable_launcher',                    'ps_launcher_enabled'),
+    ('launcher_distance',                    'ps_launcher_dist'),
+    ('launcher_prewarm_distance',                    'ps_launcher_prewarm'),
+    # Orbit
+    ('orbit_center',                    'ps_orbit_center'),
+    ('orbit_axis_x',                    'ps_orbit_axis_x'),
+    ('orbit_axis_y',                    'ps_orbit_axis_y'),
+    ('orbit_axis_z',                    'ps_orbit_axis_z'),
+    ('orbit_axis_inverse',                    'ps_orbit_axis_inverse'),
+    ('orbit_speed',                    'ps_orbit_speed'),
+    ('orbit_speed_random',                    'ps_orbit_speed_random'),
+    ('orbit_radius',                    'ps_orbit_radius'),
+    ('orbit_radius_random',                    'ps_orbit_radius_random'),
+    ('orbit_tilt',                    'ps_orbit_tilt'),
+)
 
 def update_game_prop(self, context):
     obj = context.object
     if not obj: return
-    
-    # Mapping between Addon props and Game props
-    props_map = {
-        'enabled': 'ps_enabled',
-        'trigger_enabled': 'ps_trigger',
-        'emission_mode': 'ps_emission_mode',
-        'emission_shape': 'ps_emission_shape',
-        'emission_sphere_radius': 'ps_emission_sphere_radius',
-        'emission_cone_radius':   'ps_emission_cone_radius',
-        'emission_cone_height':   'ps_emission_cone_height',
-        'emission_ring_radius':   'ps_emission_ring_radius',
-        'emission_ring_width':    'ps_emission_ring_width',
-        'max_particles': 'ps_max_particles',
-        'emission_rate': 'ps_emission_rate',
-        'emission_delay': 'ps_emission_delay',
-        'burst_count': 'ps_burst_count',
-        'is_one_shot': 'ps_is_one_shot',
-        'lifetime': 'ps_lifetime',
-        'lifetime_random': 'ps_lifetime_random',
-        'start_size': 'ps_start_size',
-        'end_size': 'ps_end_size',
-        'velocity_random': 'ps_velocity_random',
-        'simulation_space': 'ps_simulation_space',
-        'movement_type':   'ps_movement_type',
-        'drag_enabled':    'ps_drag_enabled',
-        'drag_start':      'ps_drag_start',
-        'drag_end':        'ps_drag_end',
-        'resistance_strength': 'ps_resistance',
-        'billboard_roll_enabled': 'ps_bb_roll_enabled',
-        'billboard_roll_speed':   'ps_bb_roll_speed',
-        'billboard_roll_random':  'ps_bb_roll_random',
-        'enable_gravity':  'ps_enable_gravity',
-        'gravity_power':   'ps_gravity_power',
-        'enable_collision': 'ps_enable_collision',
-        'bounce_strength': 'ps_bounce_strength',
-        'particle_type': 'ps_particle_type',
-        'start_alpha':      'ps_start_alpha',
-        'end_alpha':        'ps_end_alpha',
-        'alpha_start_time': 'ps_alpha_start_time',
-        'alpha_end_time':   'ps_alpha_end_time',
-        'color_start_time': 'ps_color_start_time',
-        'color_end_time': 'ps_color_end_time',
-        'enable_color': 'ps_enable_color',
-        'enable_alpha': 'ps_enable_alpha',
-        'enable_turbulence':        'ps_enable_turb',
-        'turbulence_strength':      'ps_turb_strength',
-        'turbulence_frequency':     'ps_turb_frequency',
-        'turbulence_speed':         'ps_turb_speed',
-        'enable_lod':               'ps_enable_lod',
-        'lod_start_distance':       'ps_lod_start',
-        'lod1_distance':            'ps_lod1_dist',
-        'lod1_max_particles':       'ps_lod1_max',
-        'lod1_emission_rate':       'ps_lod1_rate',
-        'lod1_burst_count':         'ps_lod1_burst',
-        'lod1_disable_turbulence':   'ps_lod1_no_turb',
-        'lod1_disable_collision':   'ps_lod1_no_coll',
-        'lod1_disable_emitting':    'ps_lod1_no_emit',
-        'lod1_destroy_particles':   'ps_lod1_destroy',
-        'lod2_distance':            'ps_lod2_dist',
-        'lod2_max_particles':       'ps_lod2_max',
-        'lod2_emission_rate':       'ps_lod2_rate',
-        'lod2_burst_count':         'ps_lod2_burst',
-        'lod2_disable_turbulence':   'ps_lod2_no_turb',
-        'lod2_disable_collision':   'ps_lod2_no_coll',
-        'lod2_disable_emitting':    'ps_lod2_no_emit',
-        'lod2_destroy_particles':   'ps_lod2_destroy',
-        'lod3_distance':            'ps_lod3_dist',
-        'lod3_max_particles':       'ps_lod3_max',
-        'lod3_emission_rate':       'ps_lod3_rate',
-        'lod3_burst_count':         'ps_lod3_burst',
-        'lod3_disable_turbulence':   'ps_lod3_no_turb',
-        'lod3_disable_collision':   'ps_lod3_no_coll',
-        'lod3_disable_emitting':    'ps_lod3_no_emit',
-        'lod3_destroy_particles':   'ps_lod3_destroy',
-        'enable_launcher':          'ps_launcher_enabled',
-        'launcher_distance':        'ps_launcher_dist',
-        'launcher_prewarm_distance':'ps_launcher_prewarm',
-        # Orbit
-        'orbit_center':             'ps_orbit_center',
-        'orbit_axis_x':             'ps_orbit_axis_x',
-        'orbit_axis_y':             'ps_orbit_axis_y',
-        'orbit_axis_z':             'ps_orbit_axis_z',
-        'orbit_axis_inverse':       'ps_orbit_axis_inverse',
-        'orbit_speed':              'ps_orbit_speed',
-        'orbit_speed_random':       'ps_orbit_speed_random',
-        'orbit_radius':             'ps_orbit_radius',
-        'orbit_radius_random':      'ps_orbit_radius_random',
-    }
-    
-    for addon_prop, game_prop in props_map.items():
-        if game_prop in obj.game.properties:
-            obj.game.properties[game_prop].value = getattr(self, addon_prop)
 
-    # Vectors Handlers
-    if 'ps_start_velocity_x' in obj.game.properties:
-        obj.game.properties['ps_start_velocity_x'].value = self.start_velocity[0]
-        obj.game.properties['ps_start_velocity_y'].value = self.start_velocity[1]
-        obj.game.properties['ps_start_velocity_z'].value = self.start_velocity[2]
+    gp = obj.game.properties   # local alias — avoids 32+ repeated attr lookups
+    for addon_prop, game_prop in _PROPS_MAP:
+        if game_prop in gp:
+            gp[game_prop].value = getattr(self, addon_prop)
 
-    
-    if 'ps_rotation_x' in obj.game.properties:
-        obj.game.properties['ps_rotation_x'].value = self.rotation[0]
-        obj.game.properties['ps_rotation_y'].value = self.rotation[1]
-        obj.game.properties['ps_rotation_z'].value = self.rotation[2]
-    
-    if 'ps_force_x' in obj.game.properties:
-        obj.game.properties['ps_force_x'].value = self.force[0]
-        obj.game.properties['ps_force_y'].value = self.force[1]
-        obj.game.properties['ps_force_z'].value = self.force[2]
-    
-    if 'ps_torque_x' in obj.game.properties:
-        obj.game.properties['ps_torque_x'].value = self.torque[0]
-        obj.game.properties['ps_torque_y'].value = self.torque[1]
-        obj.game.properties['ps_torque_z'].value = self.torque[2]
-    
-    if 'ps_emission_box_size_x' in obj.game.properties:
-        obj.game.properties['ps_emission_box_size_x'].value = self.emission_box_size[0]
-        obj.game.properties['ps_emission_box_size_y'].value = self.emission_box_size[1]
-        obj.game.properties['ps_emission_box_size_z'].value = self.emission_box_size[2]
+    # Vectors and compound props (per-component)
+    if 'ps_start_velocity_x' in gp:
+        gp['ps_start_velocity_x'].value = self.start_velocity[0]
+        gp['ps_start_velocity_y'].value = self.start_velocity[1]
+        gp['ps_start_velocity_z'].value = self.start_velocity[2]
 
-    if 'ps_particle_mesh' in obj.game.properties:
-        mesh_name = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
-        obj.game.properties['ps_particle_mesh'].value = mesh_name
+    if 'ps_rotation_x' in gp:
+        gp['ps_rotation_x'].value = self.rotation[0]
+        gp['ps_rotation_y'].value = self.rotation[1]
+        gp['ps_rotation_z'].value = self.rotation[2]
 
-    if 'ps_color_start_r' in obj.game.properties:
-        obj.game.properties['ps_color_start_r'].value = self.color_start[0]
-        obj.game.properties['ps_color_start_g'].value = self.color_start[1]
-        obj.game.properties['ps_color_start_b'].value = self.color_start[2]
+    if 'ps_force_x' in gp:
+        gp['ps_force_x'].value = self.force[0]
+        gp['ps_force_y'].value = self.force[1]
+        gp['ps_force_z'].value = self.force[2]
 
-    if 'ps_color_end_r' in obj.game.properties:
-        obj.game.properties['ps_color_end_r'].value = self.color_end[0]
-        obj.game.properties['ps_color_end_g'].value = self.color_end[1]
-        obj.game.properties['ps_color_end_b'].value = self.color_end[2]
+    if 'ps_torque_x' in gp:
+        gp['ps_torque_x'].value = self.torque[0]
+        gp['ps_torque_y'].value = self.torque[1]
+        gp['ps_torque_z'].value = self.torque[2]
+
+    if 'ps_emission_box_size_x' in gp:
+        gp['ps_emission_box_size_x'].value = self.emission_box_size[0]
+        gp['ps_emission_box_size_y'].value = self.emission_box_size[1]
+        gp['ps_emission_box_size_z'].value = self.emission_box_size[2]
+
+    if 'ps_particle_mesh' in gp:
+        gp['ps_particle_mesh'].value = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
+
+    if 'ps_color_start_r' in gp:
+        gp['ps_color_start_r'].value = self.color_start[0]
+        gp['ps_color_start_g'].value = self.color_start[1]
+        gp['ps_color_start_b'].value = self.color_start[2]
+
+    if 'ps_color_end_r' in gp:
+        gp['ps_color_end_r'].value = self.color_end[0]
+        gp['ps_color_end_g'].value = self.color_end[1]
+        gp['ps_color_end_b'].value = self.color_end[2]
 
 # ── Color Curve Helper ──────────────────────────────────────────────────────
 # Curve node lives inside a hidden material — the only safe home for
@@ -540,7 +399,6 @@ PARTICLE_OT_init_alpha_curve = _make_init_operator(
 PARTICLE_OT_init_size_curve  = _make_init_operator(
     "particle.init_size_curve",  "Initialize Size Curve",  "SizeCurve")
 
-
 # Particle System Properties
 class ParticleSystemProperties(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(
@@ -549,21 +407,21 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=False,
         update=update_wire_shape
     )
-    
+
     trigger_enabled: bpy.props.BoolProperty(
         name="Trigger",
         description=" Activate and Control emission via Logic Bricks",
         default=False,
         update=update_game_prop
     )
-    
+
     emission_mode: bpy.props.EnumProperty(
         name="Emission Mode",
         items=[('CONTINUOUS', "Continuous", ""), ('BURST', "Burst", "")],
         default='CONTINUOUS',
         update=update_game_prop
     )
-    
+
     # Emission Shape
     emission_shape: bpy.props.EnumProperty(
         name="Emission Shape",
@@ -578,7 +436,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default='POINT',
         update=update_wire_shape
     )
-    
+
     emission_box_size: bpy.props.FloatVectorProperty(
         name="Box Size",
         description="Size of the emission box (X, Y, Z)",
@@ -587,7 +445,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         size=3,
         update=update_wire_shape
     )
-    
+
     emission_sphere_radius: bpy.props.FloatProperty(
         name="Sphere Radius",
         description="Radius of the emission sphere",
@@ -628,16 +486,16 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         max=100.0,
         update=update_wire_shape
     )
-    
+
     max_particles: bpy.props.IntProperty(name="Max Particles", default=100, min=1, max=5000, update=update_game_prop)
     emission_rate: bpy.props.FloatProperty(name="Emission Rate", default=10.0, min=0.0, max=1000, update=update_game_prop)
-    
+
     # NEW: Delay for Burst Mode
     emission_delay: bpy.props.FloatProperty(name="Burst Delay", description="Time between bursts (seconds)", default=1.0, min=0.1, max=100.0, update=update_game_prop)
-    
+
     burst_count: bpy.props.IntProperty(name="Burst Count", default=30, min=1, max=1500, update=update_game_prop)
     is_one_shot: bpy.props.BoolProperty(name="One Shot", description="Fire once when triggered, reset when trigger stops", default=False, update=update_game_prop)
-    
+
     lifetime: bpy.props.FloatProperty(name="Lifetime", default=3.0, min=0.1, max=100.0, update=update_game_prop)
     lifetime_random: bpy.props.FloatProperty(name="Random Lifetime", default=0.5, min=0.0, max=1.0, update=update_game_prop)
     start_size: bpy.props.FloatProperty(name="Start Size", default=0.1, min=0.001, max=10.0, update=update_game_prop)
@@ -652,7 +510,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         ],
         default='SIMPLE',
     )
-    
+
     start_velocity: bpy.props.FloatVectorProperty(name="Start Velocity", default=(0.0, 0.0, 2.0), size=3, update=update_game_prop)
     velocity_random: bpy.props.FloatProperty(name="Random Velocity", default=0.5, min=0.0, max=10.0, update=update_game_prop)
     enable_gravity: bpy.props.BoolProperty(
@@ -667,7 +525,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=-9.8, min=-100.0, max=100.0,
         update=update_game_prop
     )
-    
+
     # Movement Type
     movement_type: bpy.props.EnumProperty(
         name="Movement Type",
@@ -736,6 +594,13 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         min=0.0, max=10.0,
         update=update_game_prop
     )
+    orbit_tilt: bpy.props.FloatProperty(
+        name="Tilt",
+        description="Tilt the orbit plane around an axis perpendicular to the selected orbit axis (0–360°)",
+        default=0.0,
+        min=0.0, max=360.0,
+        update=update_game_prop
+    )
     # Force-Based Properties
     force: bpy.props.FloatVectorProperty(
         name="Force",
@@ -744,7 +609,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         size=3,
         update=update_game_prop
     )
-    
+
     torque: bpy.props.FloatVectorProperty(
         name="Torque",
         description="Angular force (rotational acceleration)",
@@ -795,7 +660,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=1.0, min=0.0, max=10.0,
         update=update_game_prop
     )
-    
+
     # Simulation Space
     simulation_space: bpy.props.EnumProperty(
         name="Simulation Space",
@@ -807,7 +672,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default='WORLD',
         update=update_game_prop
     )
-    
+
     # Particle Type
     particle_type: bpy.props.EnumProperty(
         name="Particle Type",
@@ -823,10 +688,10 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     def particle_mesh_poll(self, object):
         """Only allow MESH objects as particle mesh"""
         return object.type == 'MESH'
-    
+
     particle_mesh: bpy.props.PointerProperty(
-        name="Particle Mesh", 
-        type=bpy.types.Object, 
+        name="Particle Mesh",
+        type=bpy.types.Object,
         poll=particle_mesh_poll,
         update=update_game_prop
     )
@@ -866,7 +731,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=False,
         update=update_game_prop
     )
-    
+
     bounce_strength: bpy.props.FloatProperty(
         name="Bounce Strength",
         description="How much particles bounce",
@@ -875,7 +740,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         max=1.0,
         update=update_game_prop
     )
-    
+
     # Rotation Property (XYZ like velocity)
     rotation: bpy.props.FloatVectorProperty(
         name="Rotation",
@@ -993,7 +858,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     )
     turbulence_strength: bpy.props.FloatProperty(
         name="Strength",
-        description="How hard the noise field pushese",
+        description="How hard the noise field pushes",
         default=0.5, min=0.0, max=100.0,
         update=update_game_prop
     )
@@ -1205,8 +1070,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=False
     )
 
-
-
 # Particle System Panel
 class PARTICLE_PT_upbge_panel(bpy.types.Panel):
     bl_label = "UPBGE Particle System"
@@ -1214,36 +1077,36 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "physics"
-    
+
     @classmethod
     def poll(cls, context):
         """Only show panel for valid emitter object types"""
         obj = context.object
         if obj is None:
             return False
-        
+
         # ALLOWED: Mesh, Light, Empty
         # REJECTED: Camera, Curve, Surface, Meta, Text, Armature, Lattice, Speaker, etc.
         allowed_types = {'MESH', 'LIGHT', 'EMPTY'}
         return obj.type in allowed_types
-    
+
     def draw(self, context):
         layout = self.layout
         obj = context.object
-        
-        if obj is None: 
+
+        if obj is None:
             return
-        
+
         # Double-check object type
         if obj.type not in {'MESH', 'LIGHT', 'EMPTY'}:
             layout.label(text="Particle system not available for this object type", icon='ERROR')
             return
-        
+
         box = layout.box()
         box.label(text="Setup:", icon='INFO')
         row = box.row(align=True)
         row.operator("particle.setup_logic", text="Initialize", icon='PLUS')
-        
+
         # Play Preview Toggle Button
         ps = obj.particle_system_props
         if ps.preview_active:
@@ -1257,18 +1120,16 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         clean_row.operator("particle.remove_props",  text="Remove Props",  icon='TRASH')
 
         layout.separator()
-        ps = obj.particle_system_props
-        
         layout.prop(ps, "enabled", text="Particle Emitter")
-        #Trigger 
+        #Trigger
         layout.prop(ps, "trigger_enabled", text="Emission Trigger")
         if ps.enabled:
             box = layout.box()
             box.label(text="Emission:", icon="PARTICLE_DATA")
-            
-            box.prop(ps, "emission_mode", text="Mode", icon= "PREFERENCES")
-            box.prop(ps, "emission_shape", text="Shape", icon="CUBE")
-            
+
+            box.prop(ps, "emission_mode", text="Mode", icon= "POINTCLOUD_DATA")
+            box.prop(ps, "emission_shape", text="Shape", icon="MESH_CONE")
+
             # Show shape-specific size controls
             if ps.emission_shape == 'BOX':
                 box.prop(ps, "emission_box_size")
@@ -1280,9 +1141,9 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             elif ps.emission_shape == 'RING':
                 box.prop(ps, "emission_ring_radius", text="Ring Radius")
                 box.prop(ps, "emission_ring_width",  text="Ring Width")
-            
+
             box.prop(ps, "max_particles")
-            
+
             if ps.emission_mode == 'CONTINUOUS':
                 box.prop(ps, "emission_rate")
             else: # BURST MODE
@@ -1291,16 +1152,16 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 # HIDE DELAY IF ONE SHOT IS ACTIVE
                 if not ps.is_one_shot:
                     box.prop(ps, "emission_delay")
-            
+
             box.prop(ps, "lifetime")
             box.prop(ps, "lifetime_random")
-            
+
             box = layout.box()
             box.label(text="Appearance:", icon="MESH_ICOSPHERE")
 
             # Particle type selector
             box.prop(ps, "particle_type", text="Particle Type", icon="MESH_DATA")
-            
+
             if ps.particle_type == 'MESH':
                 # Lock particle mesh during preview to prevent crashes
                 mesh_row = box.row()
@@ -1331,9 +1192,9 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                                                    levels=False, brush=False,
                                                    use_negative_slope=False)
                         box.label(text="Hit Apply Material to bake", icon='INFO')
-
-            # Material settings
             box.separator()
+            # Material settings
+            box = layout.box()
             box.label(text="Material:", icon='MATERIAL')
 
             # Texture
@@ -1399,14 +1260,13 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.separator()
             box.operator("particle.apply_material", text="Apply Material", icon='NODE_MATERIAL')
 
-
             # Physics
             box = layout.box()
             box.label(text="Physics:", icon="DRIVER_TRANSFORM")
 
             box.prop(ps, "simulation_space", text="Space", icon= "OBJECT_ORIGIN")
             box.prop(ps, "movement_type", text="Movement", icon= "EMPTY_ARROWS")
-            
+
             # Conditional UI based on movement type
             is_bb = (ps.particle_type == 'BILLBOARD')
             if ps.movement_type == 'SIMPLE':
@@ -1437,16 +1297,19 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 orb_box.prop(ps, "orbit_speed_random", text="Speed Random")
                 orb_box.prop(ps, "orbit_radius",       text="Radius")
                 orb_box.prop(ps, "orbit_radius_random",text="Radius Random")
+                orb_box.prop(ps, "orbit_tilt",         text="Tilt", icon="DRIVER_ROTATIONAL_DIFFERENCE", slider=True)
                 box.separator()
                 box.prop(ps, "enable_gravity", text="Enable Gravity")
                 if ps.enable_gravity:
                     box.prop(ps, "gravity_power", text="Gravity Power")
             else:
                 # Force-based mode
-                box.prop(ps, "start_velocity", text="Initial Velocity")
-                box.prop(ps, "force")
+                force_box = box.box()
+                force_box.label(text="Force Settings:", icon='FORCE_DRAG')
+                force_box.prop(ps, "start_velocity", text="Initial Velocity")
+                force_box.prop(ps, "force")
                 if not is_bb:
-                    box.prop(ps, "torque")
+                    force_box.prop(ps, "torque")
                 box.prop(ps, "billboard_roll_enabled", text="Billboard Roll")
                 if ps.billboard_roll_enabled:
                     roll_row = box.row(align=True)
@@ -1463,7 +1326,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "enable_gravity", text="Enable Gravity")
                 if ps.enable_gravity:
                     box.prop(ps, "gravity_power", text="Gravity Power")
-            
+
             # Collision section
             box.separator()
             box.prop(ps, "enable_collision", text="Enable Collision")
@@ -1506,7 +1369,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                     sl_box.prop(ps, "launcher_distance", text="Active Distance")
 
                 sl_box.prop(ps, "launcher_prewarm_distance", text="Pre-warm Distance")
-            
+
             box.prop(ps, "enable_lod", text="Enable LOD")
             # LOD
             if ps.enable_lod:
@@ -1577,38 +1440,37 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
     """Toggle viewport particle preview"""
     bl_idname = "particle.preview_toggle"
     bl_label = "Toggle Particle Preview"
-    
+
     _timer = None
-    _particles = None       
+    _particles = None
     _time_accumulator = 0.0
     _last_time = 0.0
     _burst_timer = 0.0
     _burst_triggered = False
-    _original_object = None  
-    _default_sphere = None   
-    _billboard_mesh = None   
-    
+    _original_object = None
+    _default_sphere = None
+    _billboard_mesh = None
+
     def modal(self, context, event):
-        # Check if user pressed 
+        # Check if user pressed
         if event.type == 'P' and event.value == 'PRESS':
             self.cancel(context)
             return {'CANCELLED'}
-        
+
         if event.type == 'TIMER':
             # Check if active object changed
             if context.object != self._original_object:
                 self.cancel(context)
                 return {'CANCELLED'}
-            
+
             obj = context.object
             if not obj or not obj.particle_system_props.preview_active:
                 self.cancel(context)
                 return {'CANCELLED'}
-            
+
             ps = obj.particle_system_props
-            
+
             # Calculate delta time
-            import time
             current_time = time.time()
             if self._last_time == 0:
                 dt = 0.016
@@ -1616,12 +1478,10 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                 dt = current_time - self._last_time
             self._last_time = current_time
             dt = min(dt, 0.1)
-            
+
             # Update existing particles
             if self._particles is None:
                 self._particles = []
-
-            import math
 
             # Hoist per-frame constants out of the particle loop
             gravity       = Vector((0.0, 0.0, ps.gravity_power if ps.enable_gravity else 0.0))
@@ -1746,7 +1606,6 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                         if area.type == 'VIEW_3D':
                             rv3d = area.spaces.active.region_3d
                             if rv3d:
-                                from mathutils import Matrix as _Mat
                                 eye     = rv3d.view_matrix.inverted().translation
                                 to_cam  = (eye - particle_obj.location).normalized()
                                 world_z = Vector((0.0, 0.0, 1.0))
@@ -1758,7 +1617,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                                 up      = to_cam.cross(right).normalized()
                                 # Build column-major rotation matrix:
                                 # col0=right(X), col1=to_cam(Y, faces camera), col2=up(Z)
-                                rot_mat = _Mat((
+                                rot_mat = Matrix((
                                     (right.x,  to_cam.x,  up.x),
                                     (right.y,  to_cam.y,  up.y),
                                     (right.z,  to_cam.z,  up.z),
@@ -1797,17 +1656,17 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             # Remove dead particles
             for i in reversed(to_remove):
                 self._particles.pop(i)
-            
+
             # Emit new particles
             if ps.enabled and ps.trigger_enabled:
                 if ps.emission_mode == 'CONTINUOUS':
                     self._time_accumulator += dt
                     interval = 1.0 / ps.emission_rate if ps.emission_rate > 0 else float('inf')
-                    
+
                     while self._time_accumulator >= interval:
                         self.spawn_particle(context)
                         self._time_accumulator -= interval
-                
+
                 elif ps.emission_mode == 'BURST':
                     if ps.is_one_shot:
                         if not self._burst_triggered:
@@ -1820,16 +1679,15 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                             for _ in range(ps.burst_count):
                                 self.spawn_particle(context)
                             self._burst_timer = 0.0
-            
+
             # Force viewport update
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
-        
+
         return {'PASS_THROUGH'}
-    
+
     def spawn_particle(self, context):
-        import math
         obj = context.object
         ps = obj.particle_system_props
 
@@ -1898,9 +1756,8 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         if is_billboard:
             # Auto-create a plane (shared mesh, instanced objects)
             if self._billboard_mesh is None:
-                import bmesh as _bmesh
                 bm_data = bpy.data.meshes.new("PS_BillboardMesh")
-                bm = _bmesh.new()
+                bm = bmesh.new()
                 s = 0.5
                 v0 = bm.verts.new((-s, 0.0, -s))
                 v1 = bm.verts.new(( s, 0.0, -s))
@@ -1976,11 +1833,11 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                                 velocity, Vector((0.0, 0.0, 0.0)), (0.0, 0.0, 0.0), is_billboard,
                                 p_col_start, p_col_end, p_col_t0, p_col_t1,
                                 p_start_alpha, p_end_alpha, p_alpha_t0, p_alpha_t1))
-    
+
     def execute(self, context):
         obj = context.object
         ps = obj.particle_system_props
-        
+
         if ps.preview_active:
             # Stop preview
             ps.preview_active = False
@@ -1997,18 +1854,18 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             self._original_object = obj  # Track which object started preview
             self._default_sphere = None  # Reset per-session so stale mesh isn't reused
             self._billboard_mesh = None  # Reset billboard plane mesh per-session
-            
+
             wm = context.window_manager
             self._timer = wm.event_timer_add(0.016, window=context.window)
             wm.modal_handler_add(self)
             return {'RUNNING_MODAL'}
-    
+
     def cancel(self, context):
         wm = context.window_manager
         if self._timer:
             wm.event_timer_remove(self._timer)
             self._timer = None
-        
+
         # Clean up all particles
         if self._particles:
             for particle_obj, *_ in self._particles:
@@ -2019,21 +1876,20 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         if self._billboard_mesh is not None:
             bpy.data.meshes.remove(self._billboard_mesh)
             self._billboard_mesh = None
-        
+
         # Reset preview_active on the original object (in case context changed)
         if self._original_object and hasattr(self._original_object, 'particle_system_props'):
             self._original_object.particle_system_props.preview_active = False
-        
+
         # Also try current object as fallback
         obj = context.object
         if obj and hasattr(obj, 'particle_system_props'):
             obj.particle_system_props.preview_active = False
-        
+
         # Force UI update
         for area in context.screen.areas:
             if area.type == 'PROPERTIES':
                 area.tag_redraw()
-
 
 class PARTICLE_OT_setup_logic(bpy.types.Operator):
     """Setup logic brick and Initialize Game Properties"""
@@ -2048,7 +1904,6 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         1x1 upright plane (Y-normal faces camera after billboard rotation),
         link it to the scene collection, and mark it hidden so it stays off-screen
         until a particle system spawns an instance from it."""
-        import bmesh as _bm
 
         # Unique name per emitter so multiple emitters don't share the same template
         plane_name = f'PS_BP_{init_obj.name}'
@@ -2058,7 +1913,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             return plane_name
 
         mesh = bpy.data.meshes.new(plane_name)
-        bm = _bm.new()
+        bm = bmesh.new()
         s = 0.5
         v0 = bm.verts.new((-s, 0.0, -s))
         v1 = bm.verts.new(( s, 0.0, -s))
@@ -2098,19 +1953,19 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-        
+
         # Camera Check
         if not scene.camera:
             for obj in scene.objects:
                 if obj.type == 'CAMERA':
                     scene.camera = obj
                     break
-        
+
         init_obj = context.active_object
         if not init_obj:
             self.report({'ERROR'}, "Please select an object first")
             return {'CANCELLED'}
-        
+
         # Validate object type
         if init_obj.type not in {'MESH', 'LIGHT', 'EMPTY'}:
             self.report({'ERROR'}, f"Particle system cannot be used on {init_obj.type} objects. Only MESH, LIGHT, and EMPTY are supported.")
@@ -2134,11 +1989,10 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             existing_ctrl.mode = 'SCRIPT'
             added.append("Controller")
         controller = existing_ctrl
-        
-        # Runtime Script with OBJECT POOLING for performance
-        script_text = """# UPBGE Particle System Runtime v0.7.1
 
-import bge
+        # Runtime Script with OBJECT POOLING for performance
+        script_text = """# UPBGE Particle System Runtime v0.9.0
+
 from bge import logic
 from mathutils import Vector, Matrix
 import random
@@ -2157,6 +2011,7 @@ _atan2  = math.atan2
 class Particle:
     __slots__ = ('position', 'velocity', 'age', 'lifetime', 'size',
                  'obj', 'rotation', 'angular_velocity', 'local_offset', 'is_active',
+                 'pool_idx',
                  'orbit_angle', 'orbit_speed', 'orbit_radius',
                  'orbit_center', 'orbit_basis_u', 'orbit_basis_v',
                  'roll_angle', 'roll_speed')
@@ -2170,6 +2025,7 @@ class Particle:
         self.rotation        = Vector((0.0, 0.0, 0.0))
         self.angular_velocity = Vector((0.0, 0.0, 0.0))
         self.local_offset    = Vector((0.0, 0.0, 0.0))
+        self.pool_idx        = -1
         self.is_active       = False
         self.orbit_angle     = 0.0
         self.orbit_speed     = 0.0
@@ -2182,12 +2038,14 @@ class Particle:
 class ParticleSystem:
     __slots__ = (
         # Identity & pool
-        'emitter', 'particle_pool', 'inactive_stack', 'active_particles',
+        'emitter', 'particle_pool', 'inactive_stack',
         'particle_template', 'time_since_emit', 'burst_triggered', 'props',
         # Cached frame constants — hoisted out of hot loop
-        '_props_raw', '_prev_mesh',
+        '_props_raw',
         '_grav', '_is_local', '_is_force', '_is_billboard',
         '_acc', '_acc_per_sec',
+        '_lifetime', '_lifetime_random',
+        '_start_velocity', '_velocity_random', '_emission_shape',
         '_size_start', '_size_delta', '_size_curve',
         '_drag_start', '_drag_end', '_resistance',
         '_enable_collision', '_bounce',
@@ -2205,8 +2063,11 @@ class ParticleSystem:
         '_launcher_active_thresh',  # precomputed: last LOD dist or launcher_dist
         '_launcher_state',   # 'INACTIVE' | 'PREWARM' | 'ACTIVE'
         '_pool_built',       # True once the pool has been created at least once
+        '_first_frame',
         # Orbit
-        '_is_orbit', '_orbit_use_emitter', '_orbit_axis_vec',
+        '_is_orbit', '_orbit_use_emitter', '_orbit_axis_vec', '_orbit_tilt_rad',
+        '_orbit_radius', '_orbit_radius_random', '_orbit_speed_val', '_orbit_speed_random',
+        '_orbit_basis_u', '_orbit_basis_v',   # cached basis vectors for ORBIT mode
         # Billboard Roll
         '_bb_roll_enabled', '_bb_roll_speed', '_bb_roll_random',
     )
@@ -2220,10 +2081,14 @@ class ParticleSystem:
         self.burst_triggered  = False
         self.props            = {}
         # Cached per-frame scalars hoisted out of the particle loop
-        self._grav            = Vector((0.0, 0.0, -9.8))
         self._is_local        = False
         self._is_force        = False
-        self._size_start      = 0.1
+        self._lifetime         = 2.0
+        self._lifetime_random  = 0.0
+        self._start_velocity   = (0.0, 0.0, 1.0)
+        self._velocity_random  = 0.0
+        self._emission_shape   = 'POINT'
+        self._size_start       = 0.1
         self._size_delta      = 0.0   # end_size - start_size, pre-subtracted
         self._size_curve      = None  # None = Simple linear; list of floats = Curve mode
         self._alpha_curve     = None  # None = Simple linear; list of floats = Curve mode
@@ -2232,7 +2097,6 @@ class ParticleSystem:
         self._resistance      = 1.0
         self._enable_collision = False
         self._bounce          = 0.5
-        self._prev_mesh       = ''
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
         self._is_billboard    = False
         self._color_curve     = None   # None = Simple linear; list of floats = Curve mode
@@ -2249,6 +2113,14 @@ class ParticleSystem:
         self._is_orbit           = False
         self._orbit_use_emitter  = True
         self._orbit_axis_vec     = Vector((0.0, 0.0, 1.0))
+        self._orbit_tilt_rad     = 0.0
+        self._orbit_radius       = 1.0
+        self._orbit_radius_random = 0.0
+        self._orbit_speed_val    = 1.0
+        self._orbit_speed_random = 0.0
+        self._orbit_basis_u      = Vector((1.0, 0.0, 0.0))
+        self._orbit_basis_v      = Vector((0.0, 1.0, 0.0))
+        self._first_frame        = True
         # Billboard Roll
         self._bb_roll_enabled    = False
         self._bb_roll_speed      = 0.3
@@ -2277,8 +2149,8 @@ class ParticleSystem:
             g('ps_emission_cone_radius',   1.0), # 8
             g('ps_emission_cone_height',   2.0), # 9
             g('ps_max_particles',       100),    # 10
-            g('ps_emission_rate',       10.0),   # 9
-            g('ps_emission_delay',      1.0),    # 10
+            g('ps_emission_rate',       10.0),   # 11
+            g('ps_emission_delay',      1.0),    # 12
             g('ps_burst_count',         30),     # 11
             g('ps_is_one_shot',         False),  # 12
             g('ps_lifetime',            3.0),    # 13
@@ -2305,10 +2177,10 @@ class ParticleSystem:
             g('ps_drag_end',             0.5),    # 34
             g('ps_resistance',           1.0),    # 35
             g('ps_enable_collision',    False),  # 36
-            g('ps_bounce_strength',     0.5),    # 34
-            g('ps_rotation_x',          0.0),    # 35
-            g('ps_rotation_y',          0.0),    # 36
-            g('ps_rotation_z',          0.0),    # 37
+            g('ps_bounce_strength',     0.5),    # 39
+            g('ps_rotation_x',          0.0),    # 40
+            g('ps_rotation_y',          0.0),    # 41
+            g('ps_rotation_z',          0.0),    # 42
             g('ps_particle_type',       'MESH'), # 38
             g('ps_billboard_template',  '  '),    # 39
             g('ps_color_start_r',       1.0),    # 40
@@ -2326,19 +2198,19 @@ class ParticleSystem:
             g('ps_enable_color',        False),  # 52
             g('ps_enable_alpha',        False),  # 53
             g('ps_enable_turb',         False),  # 54
-            g('ps_turb_strength',       0.5),    # 52
-            g('ps_turb_frequency',      0.5),    # 53
-            g('ps_turb_speed',          0.5),    # 54
+            g('ps_turb_strength',       0.5),    # 60
+            g('ps_turb_frequency',      0.5),    # 61
+            g('ps_turb_speed',          0.5),    # 62
             g('ps_enable_lod',          False),  # 55
             g('ps_lod_start',           20.0),   # 56
             g('ps_lod1_dist',           40.0),   # 57
             g('ps_lod1_max',            50),     # 58
             g('ps_lod1_rate',           10.0),   # 59
             g('ps_lod1_burst',          15),     # 60
-            g('ps_lod1_no_turb',        False),  # 64
-            g('ps_lod1_no_coll',        False),  # 62
-            g('ps_lod1_no_emit',        False),  # 63
-            g('ps_lod1_destroy',        False),  # 61
+            g('ps_lod1_no_turb',        False),  # 69
+            g('ps_lod1_no_coll',        False),  # 70
+            g('ps_lod1_no_emit',        False),  # 71
+            g('ps_lod1_destroy',        False),  # 72
             g('ps_lod2_dist',           80.0),   # 65
             g('ps_lod2_max',            20),     # 66
             g('ps_lod2_rate',           5.0),    # 67
@@ -2351,10 +2223,10 @@ class ParticleSystem:
             g('ps_lod3_max',            5),      # 74
             g('ps_lod3_rate',           1.0),    # 75
             g('ps_lod3_burst',          3),      # 76
-            g('ps_lod3_no_turb',        True),   # 80
-            g('ps_lod3_no_coll',        True),   # 78
-            g('ps_lod3_no_emit',        True),   # 79
-            g('ps_lod3_destroy',        True),   # 77
+            g('ps_lod3_no_turb',        True),   # 85
+            g('ps_lod3_no_coll',        True),   # 86
+            g('ps_lod3_no_emit',        True),   # 87
+            g('ps_lod3_destroy',        True),   # 88
             # System Launcher
             g('ps_launcher_enabled',    False),  # 89
             g('ps_launcher_dist',       50.0),   # 90
@@ -2378,6 +2250,7 @@ class ParticleSystem:
             g('ps_alpha_curve',         '  '),        # 106 — baked alpha curve, '  ' = Simple
             g('ps_emission_ring_radius', 1.0),        # 107
             g('ps_emission_ring_width',  0.1),        # 108
+            g('ps_orbit_tilt',          0.0),         # 109
         )
 
     def _build_props_from_raw(self, r):
@@ -2475,6 +2348,7 @@ class ParticleSystem:
             'orbit_radius':           r[98],
             'orbit_radius_random':    r[99],
             'orbit_axis_inverse':     r[100],
+            'orbit_tilt':             r[109],
             # Billboard Roll
             'bb_roll_enabled':        r[101],
             'bb_roll_speed':          r[102],
@@ -2507,16 +2381,15 @@ class ParticleSystem:
         p = self.props
         self._is_local   = (p['simulation_space'] == 'LOCAL')
         self._is_force   = (p['movement_type']    == 'FORCE')
+        self._lifetime        = p['lifetime']
+        self._lifetime_random = p['lifetime_random']
+        sv = p['start_velocity']
+        self._start_velocity  = (sv[0], sv[1], sv[2])  # tuple copy
+        self._velocity_random = p['velocity_random']
+        self._emission_shape  = p['emission_shape']
         self._size_start = p['start_size']
         self._size_delta = p['end_size'] - p['start_size']
-        raw_size_curve = p.get('size_curve', '')
-        if raw_size_curve and raw_size_curve.strip():
-            try:
-                self._size_curve = [float(v) for v in raw_size_curve.split(',')]
-            except Exception:
-                self._size_curve = None
-        else:
-            self._size_curve = None
+        self._size_curve = self._parse_curve(p.get('size_curve', ''))
         self._enable_collision = p['enable_collision']
         self._bounce     = p['bounce_strength']
 
@@ -2577,14 +2450,7 @@ class ParticleSystem:
         self._color_start      = p['color_start']
         self._color_end        = p['color_end']
         # Parse baked curve samples (comma-sep floats). Non-empty = Curve mode.
-        raw_curve = p.get('color_curve', '')
-        if raw_curve and raw_curve.strip():
-            try:
-                self._color_curve = [float(v) for v in raw_curve.split(',')]
-            except Exception:
-                self._color_curve = None
-        else:
-            self._color_curve = None
+        self._color_curve = self._parse_curve(p.get('color_curve', ''))
         # Curve mode spans the full lifetime (0→1); From/To only used in Simple mode
         if self._color_curve:
             self._color_t_start = 0.0
@@ -2597,14 +2463,7 @@ class ParticleSystem:
         self._enable_alpha   = p['enable_alpha']
         self._start_alpha    = p['start_alpha']
         self._end_alpha      = p['end_alpha']
-        raw_alpha_curve = p.get('alpha_curve', '')
-        if raw_alpha_curve and raw_alpha_curve.strip():
-            try:
-                self._alpha_curve = [float(v) for v in raw_alpha_curve.split(',')]
-            except Exception:
-                self._alpha_curve = None
-        else:
-            self._alpha_curve = None
+        self._alpha_curve = self._parse_curve(p.get('alpha_curve', ''))
         # Curve mode spans full lifetime — From/To only used in Simple
         if self._alpha_curve:
             self._alpha_t_start = 0.0
@@ -2654,8 +2513,43 @@ class ParticleSystem:
         mag = (ax * ax + ay * ay + az * az) ** 0.5
         if mag < 0.0001:
             az = 1.0; mag = 1.0   # fallback: Z
-        sign = -1.0 if p['orbit_axis_inverse'] else 1.0
-        self._orbit_axis_vec = Vector((sign * ax / mag, sign * ay / mag, sign * az / mag))
+        sign  = -1.0 if p['orbit_axis_inverse'] else 1.0
+        axis  = Vector((sign * ax / mag, sign * ay / mag, sign * az / mag))
+        # Tilt: rotate the axis itself around a perpendicular vector.
+        # Rodrigues (rot ⊥ axis, so axis·rot = 0):
+        #   axis' = axis·cos(θ) + (rot × axis)·sin(θ)
+        tilt_deg = p.get('orbit_tilt', 0.0)
+        if tilt_deg != 0.0:
+            theta = tilt_deg * (_pi / 180.0)
+            ref   = Vector((0.0, 1.0, 0.0)) if abs(axis.y) < 0.9 else Vector((1.0, 0.0, 0.0))
+            rot   = ref - ref.dot(axis) * axis
+            r_len = (rot.x*rot.x + rot.y*rot.y + rot.z*rot.z) ** 0.5
+            if r_len > 0.0001:
+                rot /= r_len
+            ct = _cos(theta); st = _sin(theta)
+            cr = rot.cross(axis)
+            axis = Vector((axis.x * ct + cr.x * st,
+                            axis.y * ct + cr.y * st,
+                            axis.z * ct + cr.z * st))
+            a_len = (axis.x*axis.x + axis.y*axis.y + axis.z*axis.z) ** 0.5
+            if a_len > 0.0001:
+                axis /= a_len
+        self._orbit_axis_vec  = axis
+        self._orbit_tilt_rad  = tilt_deg * (_pi / 180.0)
+        # Pre-build the orbit plane basis vectors once per props change.
+        # emit_particle uses these directly instead of rebuilding per spawn.
+        _ref = Vector((0.0, 1.0, 0.0)) if abs(axis.y) < 0.9 else Vector((1.0, 0.0, 0.0))
+        _u   = _ref - _ref.dot(axis) * axis
+        _ul  = (_u.x*_u.x + _u.y*_u.y + _u.z*_u.z) ** 0.5
+        if _ul > 0.0001:
+            _u /= _ul
+        self._orbit_basis_u = _u
+        self._orbit_basis_v = axis.cross(_u)
+        # Orbit emission attrs -- cached so emit_particle skips dict lookups
+        self._orbit_radius          = p['orbit_radius']
+        self._orbit_radius_random   = p['orbit_radius_random']
+        self._orbit_speed_val       = p['orbit_speed']
+        self._orbit_speed_random    = p['orbit_speed_random']
 
         # Billboard Roll — precompute once per props change
         self._bb_roll_enabled = p['bb_roll_enabled']
@@ -2684,6 +2578,19 @@ class ParticleSystem:
                  lerp(h(ix,iy+1,iz+1), h(ix+1,iy+1,iz+1), ux), uy),
             uz)
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_curve(raw):
+        # Parse comma-separated floats into a list.
+        # Returns None for Simple mode (blank/whitespace-only value).
+        if not raw or not raw.strip():
+            return None
+        try:
+            return [float(v) for v in raw.split(',')]
+        except Exception:
+            return None
     # Pool management
     # ------------------------------------------------------------------
     def create_particle_template(self):
@@ -2722,6 +2629,7 @@ class ParticleSystem:
             except Exception as e:
                 print(f"Pool creation error: {e}")
                 continue
+            p.pool_idx = i
             self.particle_pool.append(p)
             self.inactive_stack.append(i)   # All start inactive
         print(f"✓ Pool ready: {len(self.particle_pool)} particles")
@@ -2733,14 +2641,12 @@ class ParticleSystem:
         return None
 
     def deactivate_particle(self, p):
-        '''Hide and push index back onto inactive stack'''
+        '''Hide particle and return its index to the free stack in O(1).'''
         p.is_active = False
         if p.obj:
             p.obj.worldScale = [0.0, 0.0, 0.0]
             p.obj.visible = False
-        # Recover index by identity search (only on deactivation, not hot path)
-        idx = self.particle_pool.index(p)
-        self.inactive_stack.append(idx)
+        self.inactive_stack.append(p.pool_idx)
 
     # ------------------------------------------------------------------
     # Emission
@@ -2750,7 +2656,7 @@ class ParticleSystem:
         if not p:
             return
 
-        emission_shape  = self.props['emission_shape']
+        emission_shape  = self._emission_shape
         emitter_pos     = self.emitter.worldPosition
         emitter_ori     = self.emitter.worldOrientation
         spawn_local_offset = Vector((0.0, 0.0, 0.0))
@@ -2816,8 +2722,8 @@ class ParticleSystem:
             spawn_pos = emitter_pos.copy()
 
         # Velocity
-        vr = self.props['velocity_random']
-        sv = self.props['start_velocity']
+        vr = self._velocity_random
+        sv = self._start_velocity
         local_vel = Vector((
             sv[0] + (_random() - 0.5) * 2.0 * vr,
             sv[1] + (_random() - 0.5) * 2.0 * vr,
@@ -2825,7 +2731,7 @@ class ParticleSystem:
         ))
         world_vel = (emitter_ori @ local_vel) if self._is_local else local_vel
 
-        lifetime = self.props['lifetime'] * (1.0 + (_random() - 0.5) * self.props['lifetime_random'])
+        lifetime = self._lifetime * (1.0 + (_random() - 0.5) * self._lifetime_random)
 
         # Reset particle state
         p.position.x = spawn_pos.x; p.position.y = spawn_pos.y; p.position.z = spawn_pos.z
@@ -2856,43 +2762,31 @@ class ParticleSystem:
             p.orbit_center.y = center.y
             p.orbit_center.z = center.z
 
-            # Build orthonormal orbit plane basis
-            axis = self._orbit_axis_vec
-            ref  = Vector((0.0, 1.0, 0.0)) if abs(axis.dot(Vector((0.0, 1.0, 0.0)))) < 0.9 else Vector((1.0, 0.0, 0.0))
-            u    = ref - ref.dot(axis) * axis
-            u_len = (u.x*u.x + u.y*u.y + u.z*u.z) ** 0.5
-            if u_len > 0.0001:
-                u /= u_len
-            v = axis.cross(u)
+            # Use pre-built basis vectors from _cache_frame_constants (no per-spawn Gram-Schmidt)
+            u = self._orbit_basis_u
+            v = self._orbit_basis_v
             p.orbit_basis_u.x = u.x; p.orbit_basis_u.y = u.y; p.orbit_basis_u.z = u.z
             p.orbit_basis_v.x = v.x; p.orbit_basis_v.y = v.y; p.orbit_basis_v.z = v.z
 
-            # Radius: explicit prop + random variance
-            base_r = self.props['orbit_radius']
-            rand_r = self.props['orbit_radius_random']
-            p.orbit_radius = max(base_r + (_random() - 0.5) * 2.0 * rand_r, 0.001)
+            # Radius: use cached prop + random variance
+            p.orbit_radius = max(
+                self._orbit_radius + (_random() - 0.5) * 2.0 * self._orbit_radius_random,
+                0.001)
 
-            # Initial angle: derive from spawn offset projected onto the orbit plane
-            # so BOX/SPHERE particles start at their actual spawn positions.
-            # For POINT/CONE the offset is ~zero so angle starts at 0 (fine).
+            # Initial angle from spawn offset projected onto orbit plane
             offset = spawn_pos - center
             du = offset.dot(u)
             dv = offset.dot(v)
             p.orbit_angle = _atan2(dv, du) if (du*du + dv*dv) > 0.0001 else 0.0
 
-            speed = self.props['orbit_speed']
-            rand_s = self.props['orbit_speed_random']
-            p.orbit_speed = speed + (_random() - 0.5) * 2.0 * rand_s
+            p.orbit_speed = (self._orbit_speed_val
+                             + (_random() - 0.5) * 2.0 * self._orbit_speed_random)
 
         if p.obj:
             p.obj.worldPosition = spawn_pos
             s = self._size_start
             p.obj.worldScale = [s, s, s]
             p.obj.visible = True
-
-    def emit_burst(self):
-        for _ in range(self.props['burst_count']):
-            self.emit_particle()
 
     def _emit_burst_lod(self, burst_count, max_particles):
         active_count = len(self.particle_pool) - len(self.inactive_stack)
@@ -2926,20 +2820,24 @@ class ParticleSystem:
                     pass
             self.particle_pool    = []
             self.inactive_stack   = []
-            self.active_particles = []
             self.create_particle_template()
             self.initialize_pool()
 
-        # Recache frame constants only when props changed OR first frame
-        if props_changed or not hasattr(self, '_acc'):
+        # Recache frame constants when props changed or on the first frame.
+        # On stable frames only rescale the dt-dependent acceleration vectors.
+        if props_changed or self._first_frame:
             self._cache_frame_constants(dt)
+            self._first_frame = False
         else:
-            # Props stable: only rebuild the dt-dependent parts (acc scales with dt)
             self._acc = self._acc_per_sec * dt
             if self._is_force:
                 self._torque_rad = self._torque_per_sec * dt
 
         props = self.props
+
+        # One scene/camera fetch per update() call, shared by launcher, LOD, and billboard.
+        _frame_scene = logic.getCurrentScene()
+        _frame_cam   = _frame_scene.active_camera  # may be None if no camera in scene
 
         # ── System Launcher ────────────────────────────────────────────
         # Outer gate: controls whether the pool exists at all.
@@ -2949,14 +2847,12 @@ class ParticleSystem:
         # When LOD is enabled, the Active threshold is lod_start so the two
         # systems hand off cleanly — LOD manages quality within the active zone.
         if self._launcher_enabled:
-            scene = logic.getCurrentScene()
-            cam   = scene.active_camera
-            if cam:
-                dist = (self.emitter.worldPosition - cam.worldPosition).length
+            if _frame_cam:
+                dist = (self.emitter.worldPosition - _frame_cam.worldPosition).length
                 prev_launcher_state = self._launcher_state
 
                 # Decide the new state based purely on distance.
-                # Both thresholds are precomputed in _cache_frame_constants —
+                # Both thresholds are precomputed in _cache_frame_constants --
                 # plain float reads, zero computation here.
                 active_thresh  = self._launcher_active_thresh
                 prewarm_thresh = self._launcher_prewarm
@@ -2968,37 +2864,30 @@ class ParticleSystem:
                 else:
                     new_state = 'INACTIVE'
 
-                # ── State transitions ──────────────────────────────────
+                # State transitions
                 if new_state != prev_launcher_state:
                     if new_state in ('PREWARM', 'ACTIVE') and not self._pool_built:
-                        # Entering prewarm for the first time — build the pool silently
                         self.create_particle_template()
                         self.initialize_pool()
                         self._pool_built = True
 
                     elif new_state == 'INACTIVE' and self._pool_built:
-                        # Leaving prewarm entirely — tear down pool to free VRAM
+                        # Leaving prewarm -- tear down pool to free VRAM
                         for p in self.particle_pool:
                             if p.is_active:
                                 self.deactivate_particle(p)
                             try:
                                 p.obj.endObject()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                print(f'endObject error: {e}')
                         self.particle_pool  = []
                         self.inactive_stack = []
-                        try:
-                            self.active_particles = []
-                        except Exception:
-                            pass
-                        self._pool_built      = False
-                        self.burst_triggered  = False
-                        self.time_since_emit  = 0.0
-                        self._lod_level       = 0
+                        self._pool_built     = False
+                        self.burst_triggered = False
+                        self.time_since_emit = 0.0
+                        self._lod_level      = 0
 
                     elif new_state == 'ACTIVE' and prev_launcher_state == 'INACTIVE':
-                        # Edge case: jumped straight from INACTIVE to ACTIVE
-                        # (prewarm distance == active distance). Build pool now.
                         if not self._pool_built:
                             self.create_particle_template()
                             self.initialize_pool()
@@ -3006,13 +2895,12 @@ class ParticleSystem:
 
                 self._launcher_state = new_state
 
-                # If not ACTIVE: suppress all emission and LOD this frame and return
                 if new_state != 'ACTIVE':
                     return
         # ── end System Launcher ────────────────────────────────────────
 
-        # ── LOD evaluation ─────────────────────────────────────────
-        # Runs once per update() — O(1) distance check against active camera.
+        # ── LOD evaluation ----------------------------------------------------------
+        # Runs once per update() -- O(1) distance check against active camera.
         lod_max_particles = props['max_particles']   # default: main setting
         lod_emission_rate = props['emission_rate']
         lod_burst_count   = props['burst_count']
@@ -3022,29 +2910,25 @@ class ParticleSystem:
         lod_destroy       = False
         prev_lod_level    = self._lod_level
 
-        if self._lod_enabled:
-            scene = logic.getCurrentScene()
-            cam   = scene.active_camera
-            if cam:
-                dist = (self.emitter.worldPosition - cam.worldPosition).length
-                if dist <= self._lod_start:
-                    self._lod_level = 0
-                else:
-                    self._lod_level = 0
-                    for lvl_idx, (lvl_dist, lvl_max, lvl_rate, lvl_burst,
-                                  lvl_no_turb, lvl_ncoll, lvl_ne, lvl_destroy) in enumerate(self._lod_table):
-                        if dist >= lvl_dist:
-                            self._lod_level = lvl_idx + 1
-                            lod_no_turb     = lvl_no_turb
-                            lod_no_coll     = lvl_ncoll
-                            lod_no_emit     = lvl_ne
-                            lod_destroy     = lvl_destroy
-                            # Max particles / rate / burst are irrelevant when emitting
-                            # is disabled — skip assigning them to avoid wasted work
-                            if not lvl_ne:
-                                lod_max_particles = lvl_max
-                                lod_emission_rate = lvl_rate
-                                lod_burst_count   = lvl_burst
+        if self._lod_enabled and _frame_cam:
+            dist = (self.emitter.worldPosition - _frame_cam.worldPosition).length
+            if dist <= self._lod_start:
+                self._lod_level = 0
+            else:
+                self._lod_level = 0
+                for lvl_idx, (lvl_dist, lvl_max, lvl_rate, lvl_burst,
+                              lvl_no_turb, lvl_ncoll, lvl_ne, lvl_destroy) in enumerate(self._lod_table):
+                    if dist >= lvl_dist:
+                        self._lod_level = lvl_idx + 1
+                        lod_no_turb     = lvl_no_turb
+                        lod_no_coll     = lvl_ncoll
+                        lod_no_emit     = lvl_ne
+                        lod_destroy     = lvl_destroy
+                        # Max particles/rate/burst irrelevant when emitting disabled
+                        if not lvl_ne:
+                            lod_max_particles = lvl_max
+                            lod_emission_rate = lvl_rate
+                            lod_burst_count   = lvl_burst
 
             # Destroy particles when entering a new LOD level that requests it
             if lod_destroy and self._lod_level != prev_lod_level:
@@ -3108,10 +2992,7 @@ class ParticleSystem:
             rot_rad = self._rot_rad
 
         # Hoist billboard camera lookup outside the loop — same camera for all particles this frame
-        bb_cam = None
-        if is_billboard:
-            _scene = logic.getCurrentScene()
-            bb_cam = _scene.active_camera
+        bb_cam = _frame_cam if is_billboard else None
 
         # Drag over lifetime locals
         drag_start   = self._drag_start
@@ -3315,15 +3196,14 @@ class ParticleSystem:
                     p.rotation += speed * dt
                     obj.worldOrientation = [p.rotation.x, p.rotation.y, p.rotation.z]
 
-
 class ParticleManager:
     def __init__(self):
         self.systems = {}
         self.last_time = 0.0
         print("="*60)
-        print("PARTICLE SYSTEM v0.8.0 - OBJECT POOLING")
+        print("PARTICLE SYSTEM v0.9.0 - OBJECT POOLING")
         print("="*60)
-    
+
     def scan(self):
         scene = logic.getCurrentScene()
         for obj in scene.objects:
@@ -3337,13 +3217,13 @@ class ParticleManager:
                     if p.obj:
                         p.obj.endObject()
                 del self.systems[obj.name]
-    
+
     def update(self):
         cur = logic.getClockTime()
         dt = cur - self.last_time if self.last_time > 0 else 0.016
         self.last_time = cur
         dt = min(dt, 0.1)
-        
+
         for sys in self.systems.values():
             sys.update(dt)
 
@@ -3375,7 +3255,7 @@ init()
         sensor = next((s for s in init_obj.game.sensors if s.name == "ParticleInit"), None)
         if sensor:
             controller.link(sensor=sensor)
-        
+
         # Property Creation - only adds missing props
         def ensure_prop(name, type, value):
             if name not in init_obj.game.properties:
@@ -3384,7 +3264,7 @@ init()
                 added.append(f"prop:{name}")
 
         props = init_obj.particle_system_props
-        
+
         ensure_prop('ps_enabled', 'BOOL', props.enabled)
         ensure_prop('ps_trigger', 'BOOL', props.trigger_enabled)
         ensure_prop('ps_emission_mode', 'STRING', props.emission_mode)
@@ -3404,37 +3284,37 @@ init()
         ensure_prop('ps_start_size', 'FLOAT', props.start_size)
         ensure_prop('ps_end_size', 'FLOAT', props.end_size)
         ensure_prop('ps_velocity_random', 'FLOAT', props.velocity_random)
-        
+
         ensure_prop('ps_emission_box_size_x', 'FLOAT', props.emission_box_size[0])
         ensure_prop('ps_emission_box_size_y', 'FLOAT', props.emission_box_size[1])
         ensure_prop('ps_emission_box_size_z', 'FLOAT', props.emission_box_size[2])
-        
+
         ensure_prop('ps_start_velocity_x', 'FLOAT', props.start_velocity[0])
         ensure_prop('ps_start_velocity_y', 'FLOAT', props.start_velocity[1])
         ensure_prop('ps_start_velocity_z', 'FLOAT', props.start_velocity[2])
         ensure_prop('ps_enable_gravity', 'BOOL',  props.enable_gravity)
         ensure_prop('ps_gravity_power',  'FLOAT', props.gravity_power)
-        
+
         # Simulation space
         ensure_prop('ps_simulation_space', 'STRING', props.simulation_space)
-        
+
         # Collision properties
         ensure_prop('ps_enable_collision', 'BOOL', props.enable_collision)
         ensure_prop('ps_bounce_strength', 'FLOAT', props.bounce_strength)
-        
+
         # Movement type
         ensure_prop('ps_movement_type', 'STRING', props.movement_type)
-        
+
         # Force properties (XYZ)
         ensure_prop('ps_force_x', 'FLOAT', props.force[0])
         ensure_prop('ps_force_y', 'FLOAT', props.force[1])
         ensure_prop('ps_force_z', 'FLOAT', props.force[2])
-        
+
         # Torque properties (XYZ)
         ensure_prop('ps_torque_x', 'FLOAT', props.torque[0])
         ensure_prop('ps_torque_y', 'FLOAT', props.torque[1])
         ensure_prop('ps_torque_z', 'FLOAT', props.torque[2])
-        
+
         # Damping
         ensure_prop('ps_drag_enabled', 'BOOL',  props.drag_enabled)
         ensure_prop('ps_drag_start',   'FLOAT', props.drag_start)
@@ -3445,12 +3325,12 @@ init()
         ensure_prop('ps_bb_roll_enabled', 'BOOL',  props.billboard_roll_enabled)
         ensure_prop('ps_bb_roll_speed',   'FLOAT', props.billboard_roll_speed)
         ensure_prop('ps_bb_roll_random',  'FLOAT', props.billboard_roll_random)
-        
+
         # Rotation properties (XYZ)
         ensure_prop('ps_rotation_x', 'FLOAT', props.rotation[0])
         ensure_prop('ps_rotation_y', 'FLOAT', props.rotation[1])
         ensure_prop('ps_rotation_z', 'FLOAT', props.rotation[2])
-        
+
         mesh_name = props.particle_mesh.name if props.particle_mesh else 'ParticleSphere'
         ensure_prop('ps_particle_mesh', 'STRING', mesh_name)
         ensure_prop('ps_particle_type', 'STRING', props.particle_type)
@@ -3525,6 +3405,7 @@ init()
         ensure_prop('ps_orbit_speed_random',  'FLOAT', props.orbit_speed_random)
         ensure_prop('ps_orbit_radius',        'FLOAT', props.orbit_radius)
         ensure_prop('ps_orbit_radius_random', 'FLOAT', props.orbit_radius_random)
+        ensure_prop('ps_orbit_tilt',          'FLOAT', props.orbit_tilt)
 
         # create per-emitter template and store its name
         if props.particle_type == 'BILLBOARD':
@@ -3729,7 +3610,6 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
         self.report({'INFO'}, f"Material '{mat_name}' applied to '{target.name}'")
         return {'FINISHED'}
 
-
 class PARTICLE_OT_remove_script(bpy.types.Operator):
     """Remove the ParticleController logic bricks and the shared runtime script.
     Use this before re-initializing to force a clean script rebuild."""
@@ -3769,7 +3649,6 @@ class PARTICLE_OT_remove_script(bpy.types.Operator):
             self.report({'WARNING'}, "Nothing to remove — not initialized on this object")
         return {'FINISHED'}
 
-
 class PARTICLE_OT_remove_props(bpy.types.Operator):
     """Remove all ps_ game properties from the active object.
     Use this before re-initializing to force a full property rebuild."""
@@ -3796,7 +3675,6 @@ class PARTICLE_OT_remove_props(bpy.types.Operator):
         self.report({'INFO'}, f"Removed {len(indices)} game properties")
         return {'FINISHED'}
 
-
 classes = (
     ParticleSystemProperties,
     PARTICLE_PT_upbge_panel,
@@ -3817,7 +3695,7 @@ def register():
 
 def unregister():
     # Clean up all PS wire objects from all objects in all scenes
-    wire_prefixes = ("PS_Wire_Box_", "PS_Wire_Sphere_", "PS_Wire_Cone_")
+    wire_prefixes = ("PS_Wire_Box_", "PS_Wire_Sphere_", "PS_Wire_Cone_", "PS_Wire_Ring_")
     for obj in list(bpy.data.objects):
         if any(obj.name.startswith(prefix) for prefix in wire_prefixes):
             mesh = obj.data if obj.type == 'MESH' else None
