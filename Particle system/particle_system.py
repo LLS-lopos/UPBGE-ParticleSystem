@@ -1,10 +1,10 @@
 bl_info = {
     "name": "UPBGE Particle System",
     "author": "Ghost DEV",
-    "version": (0, 8, 0),
+    "version": (0, 8, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
-    "description": "Particle system for UPBGE (NO GPU)",
+    "description": "Addon creates a realtime particle system for UPBGE",
     "warning": "This beta version sill under development and is not stable at all times",
     "wiki_url": "",
     "category": "Physics",
@@ -27,45 +27,47 @@ def update_wire_shape(self, context):
     ps = obj.particle_system_props
 
     # Wire names for each shape type
-    wire_box_name    = f"PS_Wire_Box_{obj.name}"
-    wire_sphere_name = f"PS_Wire_Sphere_{obj.name}"
-    wire_cone_name   = f"PS_Wire_Cone_{obj.name}"
-    wire_ring_name   = f"PS_Wire_Ring_{obj.name}"
+    wire_box_name        = f"PS_Wire_Box_{obj.name}"
+    wire_sphere_name     = f"PS_Wire_Sphere_{obj.name}"
+    wire_hemisphere_name = f"PS_Wire_Hemisphere_{obj.name}"
+    wire_cone_name       = f"PS_Wire_Cone_{obj.name}"
+    wire_ring_name       = f"PS_Wire_Ring_{obj.name}"
 
     # Get existing wires
-    wire_box    = bpy.data.objects.get(wire_box_name)
-    wire_sphere = bpy.data.objects.get(wire_sphere_name)
-    wire_cone   = bpy.data.objects.get(wire_cone_name)
-    wire_ring   = bpy.data.objects.get(wire_ring_name)
+    wire_box        = bpy.data.objects.get(wire_box_name)
+    wire_sphere     = bpy.data.objects.get(wire_sphere_name)
+    wire_hemisphere = bpy.data.objects.get(wire_hemisphere_name)
+    wire_cone       = bpy.data.objects.get(wire_cone_name)
+    wire_ring       = bpy.data.objects.get(wire_ring_name)
+
+    all_wires = (wire_box, wire_sphere, wire_hemisphere, wire_cone, wire_ring)
 
     # If disabled or POINT shape, hide all wires
     if not ps.enabled or ps.emission_shape == 'POINT':
-        for w in (wire_box, wire_sphere, wire_cone, wire_ring):
+        for w in all_wires:
             if w:
                 w.hide_viewport = True
                 w.hide_render   = True
         update_game_prop(self, context)
         return
 
-    # Create Box wire if it doesn't exist
+    # Create wires if they don't exist yet
     if not wire_box:
         wire_box = create_box_wire(obj, wire_box_name)
-
-    # Create Sphere wire if it doesn't exist
     if not wire_sphere:
         wire_sphere = create_sphere_wire(obj, wire_sphere_name)
-
-    # Create Cone wire if it doesn't exist
+    if not wire_hemisphere:
+        wire_hemisphere = create_hemisphere_wire(obj, wire_hemisphere_name)
     if not wire_cone:
         wire_cone = create_cone_wire(obj, wire_cone_name)
-
-    # Create Ring wire if it doesn't exist
     if not wire_ring:
         wire_ring = create_ring_wire(obj, wire_ring_name)
 
+    all_wires = (wire_box, wire_sphere, wire_hemisphere, wire_cone, wire_ring)
+
     # Helper: hide all then show only the active wire
     def _hide_all():
-        for w in (wire_box, wire_sphere, wire_cone, wire_ring):
+        for w in all_wires:
             w.hide_viewport = True
             w.hide_render   = True
 
@@ -83,9 +85,21 @@ def update_wire_shape(self, context):
         wire_sphere.hide_viewport = False
         wire_sphere.hide_render   = True
 
+    elif ps.emission_shape == 'HEMISPHERE':
+        _hide_all()
+        r = ps.emission_hemisphere_radius
+        wire_hemisphere.scale         = (r, r, r)
+        wire_hemisphere.hide_viewport = False
+        wire_hemisphere.hide_render   = True
+
     elif ps.emission_shape == 'CONE':
         _hide_all()
-        wire_cone.scale         = (ps.emission_cone_radius, ps.emission_cone_radius, ps.emission_cone_height)
+        cr = ps.emission_cone_radius
+        ch = ps.emission_cone_height
+        br = ps.emission_cone_base_radius
+        # Rebuild mesh to reflect current base_radius ring
+        update_cone_wire_base(wire_cone, cr, br, ch)
+        wire_cone.scale         = (cr, cr, ch)
         wire_cone.hide_viewport = False
         wire_cone.hide_render   = True
 
@@ -115,6 +129,10 @@ def _make_wire_obj(obj, wire_name, shape_type):
     w.hide_select    = True
     w.hide_viewport  = True
     w.color          = (0, 1, 1, 1)
+    try:
+        w.game.physics_type = 'NO_COLLISION'
+    except AttributeError:
+        pass  # Not available in non-UPBGE / standard Blender
     return w
 
 def create_box_wire(obj, wire_name):
@@ -145,18 +163,73 @@ def create_sphere_wire(obj, wire_name):
     bm.to_mesh(w.data); bm.free()
     return w
 
-def create_cone_wire(obj, wire_name):
-    """Cone wire: tip at origin, unit base ring at Z=+1. Scale=(radius,radius,height)."""
-    w = _make_wire_obj(obj, wire_name, 'CONE')
-    bm = bmesh.new(); seg = 32; tau = 2.0 * math.pi
-    tip  = bm.verts.new((0.0, 0.0, 0.0))
-    base = [bm.verts.new((math.cos(tau*i/seg), math.sin(tau*i/seg), 1.0)) for i in range(seg)]
+def create_hemisphere_wire(obj, wire_name):
+    """Hemisphere wire: equator ring (XY) + two upper half great-circles (XZ, YZ). Scale=(r,r,r)."""
+    w = _make_wire_obj(obj, wire_name, 'HEMISPHERE')
+    bm = bmesh.new(); seg = 32; tau = 2.0 * math.pi; half = seg // 2
+    # Full equator ring in XY plane
+    eq = [bm.verts.new((math.cos(tau*i/seg), math.sin(tau*i/seg), 0.0)) for i in range(seg)]
     for i in range(seg):
-        bm.edges.new((base[i], base[(i+1) % seg]))
-    for i in range(0, seg, 8):
-        bm.edges.new((tip, base[i]))
+        bm.edges.new((eq[i], eq[(i+1) % seg]))
+    # Upper half of XZ great circle (Z >= 0: i from 0 to half inclusive)
+    xz = [bm.verts.new((math.cos(math.pi*i/half), 0.0, math.sin(math.pi*i/half))) for i in range(half+1)]
+    for i in range(half):
+        bm.edges.new((xz[i], xz[i+1]))
+    # Upper half of YZ great circle
+    yz = [bm.verts.new((0.0, math.cos(math.pi*i/half), math.sin(math.pi*i/half))) for i in range(half+1)]
+    for i in range(half):
+        bm.edges.new((yz[i], yz[i+1]))
     bm.to_mesh(w.data); bm.free()
     return w
+
+def create_cone_wire(obj, wire_name):
+    """Cone wire: bottom ring at Z=0 (scaled by base_radius/cone_radius), top ring at Z=+1.
+    4 struts connect matching points on both rings.
+    Scale=(cone_radius, cone_radius, cone_height) at show time.
+    Mesh is rebuilt by update_cone_wire_base() whenever dimensions change."""
+    w = _make_wire_obj(obj, wire_name, 'CONE')
+    # Build with base_ratio=0 initially (point tip) — will be rebuilt on first show
+    _build_cone_wire_mesh(w.data, base_ratio=0.0)
+    return w
+
+def _build_cone_wire_mesh(mesh, base_ratio):
+    """Write cone wire geometry into mesh.
+    base_ratio = base_radius / cone_radius (local space).
+    base_ratio == 0  → single tip vertex at origin (classic sharp cone).
+    base_ratio  > 0  → circle at Z=0 with that ratio, connected to top ring."""
+    seg = 32; tau = 2.0 * math.pi
+    bm = bmesh.new()
+
+    # Top ring at Z=+1 (the wide opening, which is the inverted head in the viewport)
+    top = [bm.verts.new((math.cos(tau*i/seg), math.sin(tau*i/seg), 1.0)) for i in range(seg)]
+    for i in range(seg):
+        bm.edges.new((top[i], top[(i+1) % seg]))
+
+    if base_ratio > 0.0:
+        # Bottom ring at Z=0 — radius = base_ratio in local space
+        bot = [bm.verts.new((base_ratio*math.cos(tau*i/seg),
+                              base_ratio*math.sin(tau*i/seg), 0.0)) for i in range(seg)]
+        for i in range(seg):
+            bm.edges.new((bot[i], bot[(i+1) % seg]))
+        # 4 struts at 0°, 90°, 180°, 270°
+        for i in range(0, seg, seg // 4):
+            bm.edges.new((bot[i], top[i]))
+    else:
+        # Classic sharp tip at origin
+        tip = bm.verts.new((0.0, 0.0, 0.0))
+        for i in range(0, seg, seg // 4):
+            bm.edges.new((tip, top[i]))
+
+    bm.to_mesh(mesh)
+    bm.free()
+
+def update_cone_wire_base(wire_cone, cone_radius, cone_base_radius, cone_height):
+    """Rebuild the cone wire mesh to reflect the current base_radius.
+    Called from update_wire_shape whenever cone dimensions change."""
+    if wire_cone is None:
+        return
+    ratio = (cone_base_radius / cone_radius) if cone_radius > 0.0 and cone_base_radius > 0.0 else 0.0
+    _build_cone_wire_mesh(wire_cone.data, base_ratio=ratio)
 
 def create_ring_wire(obj, wire_name):
     """Unit circle in XY plane. Scale=(ring_radius,ring_radius,1) at show time."""
@@ -174,8 +247,11 @@ _PROPS_MAP = (
     ('emission_mode',                    'ps_emission_mode'),
     ('emission_shape',                    'ps_emission_shape'),
     ('emission_sphere_radius',                    'ps_emission_sphere_radius'),
-    ('emission_cone_radius',                    'ps_emission_cone_radius'),
-    ('emission_cone_height',                    'ps_emission_cone_height'),
+    ('emission_hemisphere_radius',                'ps_emission_hemisphere_radius'),
+    ('emission_cone_radius',                      'ps_emission_cone_radius'),
+    ('emission_cone_height',                      'ps_emission_cone_height'),
+    ('emission_cone_base_radius',                 'ps_emission_cone_base_radius'),
+    ('emit_from',                                 'ps_emit_from'),
     ('emission_ring_radius',                    'ps_emission_ring_radius'),
     ('emission_ring_width',                    'ps_emission_ring_width'),
     ('max_particles',                    'ps_max_particles'),
@@ -189,18 +265,21 @@ _PROPS_MAP = (
     ('end_size',                    'ps_end_size'),
     ('velocity_random',                    'ps_velocity_random'),
     ('simulation_space',                    'ps_simulation_space'),
+    ('parent_with_emitter',                 'ps_parent_with_emitter'),
     ('movement_type',                    'ps_movement_type'),
     ('drag_enabled',                    'ps_drag_enabled'),
     ('drag_start',                    'ps_drag_start'),
     ('drag_end',                    'ps_drag_end'),
     ('resistance_strength',                    'ps_resistance'),
     ('billboard_roll_enabled',                    'ps_bb_roll_enabled'),
-    ('billboard_roll_speed',                    'ps_bb_roll_speed'),
-    ('billboard_roll_random',                    'ps_bb_roll_random'),
+    ('billboard_roll_speed',                      'ps_bb_roll_speed'),
+    ('billboard_roll_random',                     'ps_bb_roll_random'),
+    ('billboard_facing',                          'ps_bb_facing'),
     ('enable_gravity',                    'ps_enable_gravity'),
     ('gravity_power',                    'ps_gravity_power'),
     ('enable_collision',                    'ps_enable_collision'),
     ('bounce_strength',                    'ps_bounce_strength'),
+    ('stop_on_collision',                  'ps_stop_on_collision'),
     ('particle_type',                    'ps_particle_type'),
     ('start_alpha',                    'ps_start_alpha'),
     ('end_alpha',                    'ps_end_alpha'),
@@ -254,6 +333,19 @@ _PROPS_MAP = (
     ('orbit_radius',                    'ps_orbit_radius'),
     ('orbit_radius_random',                    'ps_orbit_radius_random'),
     ('orbit_tilt',                    'ps_orbit_tilt'),
+    # LOD level count — gates how many LOD entries the runtime respects
+    ('lod_levels',                    'ps_lod_levels'),
+    # Color/Alpha/Size mode flags
+    ('color_mode',                    'ps_color_mode'),
+    ('alpha_mode',                    'ps_alpha_mode'),
+    ('size_mode',                     'ps_size_mode'),
+    # Sub-Emitter
+    ('enable_sub_emitter',                    'ps_sub_emitter_enabled'),
+    ('sub_emitter_inherit_velocity',           'ps_sub_emitter_inherit_vel'),
+    ('enable_sub_emitter_birth',               'ps_sub_birth_enabled'),
+    ('sub_emitter_birth_inherit_velocity',     'ps_sub_birth_inherit_vel'),
+    ('enable_sub_emitter_collision',           'ps_sub_coll_enabled'),
+    ('sub_emitter_collision_inherit_velocity', 'ps_sub_coll_inherit_vel'),
 )
 
 def update_game_prop(self, context):
@@ -293,6 +385,15 @@ def update_game_prop(self, context):
 
     if 'ps_particle_mesh' in gp:
         gp['ps_particle_mesh'].value = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
+
+    if 'ps_sub_emitter' in gp:
+        gp['ps_sub_emitter'].value = self.sub_emitter_object.name if self.sub_emitter_object else ' '
+
+    if 'ps_sub_birth' in gp:
+        gp['ps_sub_birth'].value = self.sub_emitter_birth_object.name if self.sub_emitter_birth_object else ' '
+
+    if 'ps_sub_coll' in gp:
+        gp['ps_sub_coll'].value = self.sub_emitter_collision_object.name if self.sub_emitter_collision_object else ' '
 
     if 'ps_color_start_r' in gp:
         gp['ps_color_start_r'].value = self.color_start[0]
@@ -427,11 +528,12 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Emission Shape",
         description="Shape from which particles are emitted",
         items=[
-            ('POINT',  "Point",  "Emit from center point"),
-            ('BOX',    "Box",    "Emit from random points within a box volume"),
-            ('SPHERE', "Sphere", "Emit from random points within a sphere volume"),
-            ('CONE',   "Cone",   "Emit from random points within a cone volume — tip at emitter, opening upward"),
-            ('RING',   "Ring",   "Emit from a flat ring around the emitter"),
+            ('POINT',      "Point",      "Emit from center point"),
+            ('BOX',        "Box",        "Emit from random points within a box volume"),
+            ('SPHERE',     "Sphere",     "Emit from random points within a sphere volume"),
+            ('HEMISPHERE', "Hemisphere", "Emit from random points within the upper half-sphere (+Z)"),
+            ('CONE',       "Cone",       "Emit from random points within a cone volume — tip at emitter, opening upward"),
+            ('RING',       "Ring",       "Emit from a flat ring around the emitter"),
         ],
         default='POINT',
         update=update_wire_shape
@@ -454,6 +556,14 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         max=100.0,
         update=update_wire_shape
     )
+    emission_hemisphere_radius: bpy.props.FloatProperty(
+        name="Hemisphere Radius",
+        description="Radius of the emission hemisphere",
+        default=1.0,
+        min=0.01,
+        max=100.0,
+        update=update_wire_shape
+    )
     emission_cone_radius: bpy.props.FloatProperty(
         name="Cone Radius",
         description="Radius of the cone base",
@@ -467,6 +577,15 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         description="Height of the cone",
         default=2.0,
         min=0.01,
+        max=100.0,
+        update=update_wire_shape
+    )
+    emission_cone_base_radius: bpy.props.FloatProperty(
+        name="Base Radius",
+        description="Radius of the opening at the top of the cone (the wide inverted end). "
+                    "When Emit From is set to Base, particles spawn from this disk",
+        default=0.0,
+        min=0.0,
         max=100.0,
         update=update_wire_shape
     )
@@ -485,6 +604,18 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         min=0.0,
         max=100.0,
         update=update_wire_shape
+    )
+
+    emit_from: bpy.props.EnumProperty(
+        name="Emit From",
+        description="Where within the emission shape particles spawn",
+        items=[
+            ('VOLUME',  "Volume",  "Spawn at random positions throughout the full interior volume"),
+            ('SURFACE', "Surface", "Spawn only on the outer surface of the shape"),
+            ('BASE',    "Base",    "Spawn only on the base disk of the cone (cone shape only)"),
+        ],
+        default='VOLUME',
+        update=update_game_prop
     )
 
     max_particles: bpy.props.IntProperty(name="Max Particles", default=100, min=1, max=5000, update=update_game_prop)
@@ -516,7 +647,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     enable_gravity: bpy.props.BoolProperty(
         name="Enable Gravity",
         description="Enable gravity along the Z axis",
-        default=True,
+        default=False,
         update=update_game_prop
     )
     gravity_power: bpy.props.FloatProperty(
@@ -636,6 +767,26 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    billboard_facing: bpy.props.EnumProperty(
+        name="Rotation Method",
+        description=(
+            "How each billboard orients itself toward the camera.\n"
+            "Camera Rotation: copies the camera's own orientation matrix — all particles "
+            "share one matrix, cheapest, best for flat effects (rain, sparks).\n"
+            "Look-At: each particle independently builds a 3D rotation that points its "
+            "normal directly at the camera — slightly more expensive but gives correct "
+            "depth layering for volumetric effects like fire and smoke"
+        ),
+        items=[
+            ('CAM_ROT', "Camera Rotation",
+             "Copy camera orientation — all particles share one matrix per frame (default)"),
+            ('LOOK_AT', "Look-At",
+             "Each particle faces the camera in true 3D — better for fire and volumetric effects"),
+        ],
+        default='CAM_ROT',
+        update=update_game_prop
+    )
+
     drag_enabled: bpy.props.BoolProperty(
         name="Drag over Lifetime",
         description="Apply air resistance that changes over the particle lifetime",
@@ -673,6 +824,13 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    parent_with_emitter: bpy.props.BoolProperty(
+        name="Parent with Emitter",
+        description="Particles follow the emitter position and rotation as if parented, while still simulating physics freely",
+        default=False,
+        update=update_game_prop
+    )
+
     # Particle Type
     particle_type: bpy.props.EnumProperty(
         name="Particle Type",
@@ -702,6 +860,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             "Apply textures to the particle"
         ),
         default=False,
+        update=update_game_prop
     )
 
     billboard_texture: bpy.props.PointerProperty(
@@ -738,6 +897,13 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         default=0.5,
         min=0.0,
         max=1.0,
+        update=update_game_prop
+    )
+
+    stop_on_collision: bpy.props.BoolProperty(
+        name="Stop Movement",
+        description="Freeze particle in place when it hits a surface (only active when Bounce is 0)",
+        default=False,
         update=update_game_prop
     )
 
@@ -1063,12 +1229,83 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    # Sub-Emitter — On Death
+    enable_sub_emitter: bpy.props.BoolProperty(
+        name="On Death",
+        description="Spawn a burst from another particle system when each particle dies",
+        default=False,
+        update=update_game_prop
+    )
+
+    def sub_emitter_poll(self, object):
+        """Only allow objects that have been initialized as a particle emitter"""
+        return 'ps_enabled' in object.game.properties
+
+    sub_emitter_object: bpy.props.PointerProperty(
+        name="Sub-Emitter (Death)",
+        type=bpy.types.Object,
+        description="Particle emitter to burst at the death position of each particle",
+        poll=sub_emitter_poll,
+    )
+
+    sub_emitter_inherit_velocity: bpy.props.BoolProperty(
+        name="Inherit Velocity",
+        description="Add the dying particle's velocity to the sub-emitter's start velocity",
+        default=False,
+        update=update_game_prop
+    )
+
+    # Sub-Emitter — On Birth
+    enable_sub_emitter_birth: bpy.props.BoolProperty(
+        name="On Birth",
+        description="Spawn a burst from another particle system when each particle is born",
+        default=False,
+        update=update_game_prop
+    )
+
+    sub_emitter_birth_object: bpy.props.PointerProperty(
+        name="Sub-Emitter (Birth)",
+        type=bpy.types.Object,
+        description="Particle emitter to burst at the spawn position of each new particle",
+        poll=sub_emitter_poll,
+    )
+
+    sub_emitter_birth_inherit_velocity: bpy.props.BoolProperty(
+        name="Inherit Velocity",
+        description="Add the newborn particle's velocity to the birth sub-emitter's start velocity",
+        default=False,
+        update=update_game_prop
+    )
+
+    # Sub-Emitter — On Collision
+    enable_sub_emitter_collision: bpy.props.BoolProperty(
+        name="On Collision",
+        description="Spawn a burst from another particle system when each particle hits a surface",
+        default=False,
+        update=update_game_prop
+    )
+
+    sub_emitter_collision_object: bpy.props.PointerProperty(
+        name="Sub-Emitter (Collision)",
+        type=bpy.types.Object,
+        description="Particle emitter to burst at the collision point when a particle hits a surface",
+        poll=sub_emitter_poll,
+    )
+
+    sub_emitter_collision_inherit_velocity: bpy.props.BoolProperty(
+        name="Inherit Velocity",
+        description="Add the colliding particle's velocity to the collision sub-emitter's start velocity",
+        default=False,
+        update=update_game_prop
+    )
+
     # Preview mode property
     preview_active: bpy.props.BoolProperty(
         name="Preview Active",
         description="Internal property to track preview state",
         default=False
     )
+
 
 # Particle System Panel
 class PARTICLE_PT_upbge_panel(bpy.types.Panel):
@@ -1107,7 +1344,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         row = box.row(align=True)
         row.operator("particle.setup_logic", text="Initialize", icon='PLUS')
 
-        # Play Preview Toggle Button
+        # Preview Play/Stop button
         ps = obj.particle_system_props
         if ps.preview_active:
             row.operator("particle.preview_toggle", text="Stop Preview", icon='PAUSE', depress=True)
@@ -1129,15 +1366,26 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
 
             box.prop(ps, "emission_mode", text="Mode", icon= "POINTCLOUD_DATA")
             box.prop(ps, "emission_shape", text="Shape", icon="MESH_CONE")
+            
+            # Emit From — only for shapes with a meaningful interior or surface
+            if ps.emission_shape not in ('POINT', 'RING'):
+                emit_row = box.row()
+                emit_row.prop(ps, "emit_from", text="Emit From")
+                # BASE is cone-only — warn if selected on another shape
+                if ps.emit_from == 'BASE' and ps.emission_shape != 'CONE':
+                    box.label(text="'Base' is only available for Cone shape", icon='ERROR')
 
             # Show shape-specific size controls
             if ps.emission_shape == 'BOX':
                 box.prop(ps, "emission_box_size")
             elif ps.emission_shape == 'SPHERE':
                 box.prop(ps, "emission_sphere_radius")
+            elif ps.emission_shape == 'HEMISPHERE':
+                box.prop(ps, "emission_hemisphere_radius", text="Radius")
             elif ps.emission_shape == 'CONE':
-                box.prop(ps, "emission_cone_radius",  text="Cone Radius")
-                box.prop(ps, "emission_cone_height",  text="Cone Height")
+                box.prop(ps, "emission_cone_radius",      text="Cone Radius")
+                box.prop(ps, "emission_cone_height",      text="Cone Height")
+                box.prop(ps, "emission_cone_base_radius", text="Base Radius")
             elif ps.emission_shape == 'RING':
                 box.prop(ps, "emission_ring_radius", text="Ring Radius")
                 box.prop(ps, "emission_ring_width",  text="Ring Width")
@@ -1174,6 +1422,8 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 bb_name = f"PS_BP_{obj.name}"
                 if bb_name in bpy.data.objects:
                     box.label(text=f"Plane: {bb_name}", icon='MESH_PLANE')
+                # Rotation method — only meaningful for billboards
+                box.prop(ps, "billboard_facing", text="Rotation Method", icon='ORIENTATION_GIMBAL')
 
             box.prop(ps, "size_mode", text="Size Mode")
             size_row = box.row(align=True)
@@ -1265,6 +1515,8 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.label(text="Physics:", icon="DRIVER_TRANSFORM")
 
             box.prop(ps, "simulation_space", text="Space", icon= "OBJECT_ORIGIN")
+            if ps.simulation_space == 'LOCAL':
+                box.prop(ps, "parent_with_emitter", text="Parent with Emitter")
             box.prop(ps, "movement_type", text="Movement", icon= "EMPTY_ARROWS")
 
             # Conditional UI based on movement type
@@ -1332,6 +1584,8 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.prop(ps, "enable_collision", text="Enable Collision")
             if ps.enable_collision:
                 box.prop(ps, "bounce_strength", slider=True)
+                if ps.bounce_strength == 0.0:
+                    box.prop(ps, "stop_on_collision", text="Stop Movement")
 
             # Turbulence section
             box.separator()
@@ -1340,6 +1594,40 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "turbulence_strength",  text="Strength")
                 box.prop(ps, "turbulence_frequency", text="Frequency")
                 box.prop(ps, "turbulence_speed",     text="Speed")
+
+            # Sub-Emitter section
+            box = layout.box()
+            box.label(text="Sub-Emitter:", icon="PARTICLES")
+
+            def _draw_sub_event(box, enable_prop, obj_prop, inherit_prop, label, obj_ref):
+                row = box.row(align=True)
+                row.prop(ps, enable_prop, text=label)
+                if getattr(ps, enable_prop):
+                    box.prop(ps, obj_prop, text="")
+                    if obj_ref is None:
+                        box.label(text="Assign an initialized emitter", icon='INFO')
+                    elif obj_ref == obj:
+                        box.label(text="Cannot be the emitter itself", icon='ERROR')
+                    else:
+                        box.prop(ps, inherit_prop, text="Inherit Velocity")
+
+            _draw_sub_event(box,
+                "enable_sub_emitter", "sub_emitter_object", "sub_emitter_inherit_velocity",
+                "On Death", ps.sub_emitter_object)
+            _draw_sub_event(box,
+                "enable_sub_emitter_birth", "sub_emitter_birth_object", "sub_emitter_birth_inherit_velocity",
+                "On Birth", ps.sub_emitter_birth_object)
+            # On Collision only makes sense when collision is enabled
+            coll_row = box.row(align=True)
+            if not ps.enable_collision:
+                coll_row.enabled = False
+                coll_row.prop(ps, "enable_sub_emitter_collision", text="On Collision")
+                box.label(text="Enable Collision to use On Collision sub-emitter", icon='INFO')
+            else:
+                _draw_sub_event(box,
+                    "enable_sub_emitter_collision", "sub_emitter_collision_object",
+                    "sub_emitter_collision_inherit_velocity",
+                    "On Collision", ps.sub_emitter_collision_object)
 
             # Render / LOD box / System launcher
             box = layout.box()
@@ -1481,7 +1769,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
             # Update existing particles
             if self._particles is None:
-                self._particles = []
+                self._particles = []  # Safety guard — normally set in execute()
 
             # Hoist per-frame constants out of the particle loop
             gravity       = Vector((0.0, 0.0, ps.gravity_power if ps.enable_gravity else 0.0))
@@ -1523,6 +1811,23 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             _preview_alpha_curve = (sample_alpha_curve(obj.name)
                                     if (ps.enable_alpha and ps.alpha_mode == 'CURVE') else None)
 
+            # Fetch viewport camera data once per tick.
+            # _cam_rot_mat — used by CAM_ROT mode (shared matrix for all particles).
+            # _cam_eye     — used by LOOK_AT mode (per-particle direction vector).
+            _cam_eye = None
+            _cam_rot_mat = None
+            if ps.particle_type == 'BILLBOARD':
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        rv3d = area.spaces.active.region_3d
+                        if rv3d:
+                            view_inv = rv3d.view_matrix.inverted()
+                            _cam_eye = view_inv.translation.copy()
+                            # Camera orientation + 90° X correction so the XZ plane
+                            # faces the camera rather than lying parallel to it.
+                            _cam_rot_mat = view_inv.to_3x3() @ Matrix.Rotation(math.pi / 2.0, 3, 'X')
+                        break
+
             to_remove = []
             for i, particle_data in enumerate(self._particles):
                 particle_obj, age, lifetime, start_size, end_size, velocity, angular_velocity, rotation, is_billboard, col_start, col_end, col_t0, col_t1, p_start_alpha, p_end_alpha, p_alpha_t0, p_alpha_t1 = particle_data
@@ -1530,7 +1835,10 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
                 if age >= lifetime:
                     to_remove.append(i)
-                    bpy.data.objects.remove(particle_obj, do_unlink=True)
+                    try:
+                        bpy.data.objects.remove(particle_obj, do_unlink=True)
+                    except ReferenceError:
+                        pass
                     continue
 
                 # Physics
@@ -1544,12 +1852,46 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                     # SIMPLE: gravity only
                     velocity += grav_dt
 
+                # Turbulence — sample noise at particle world position using the same
+                # value-noise hash as the runtime script, so preview matches in-game.
+                if ps.enable_turbulence:
+                    def _preview_noise(x, y, z):
+                        ix, iy, iz = int(x) & 255, int(y) & 255, int(z) & 255
+                        fx, fy, fz = x - int(x), y - int(y), z - int(z)
+                        ux = fx * fx * (3.0 - 2.0 * fx)
+                        uy = fy * fy * (3.0 - 2.0 * fy)
+                        uz = fz * fz * (3.0 - 2.0 * fz)
+                        def h(a, b, c):
+                            n = (a * 1619 + b * 31337 + c * 6971) & 0x7fffffff
+                            n = (n >> 13) ^ n
+                            return ((n * (n * n * 60493 + 19990303) + 1376312589) & 0x7fffffff) / 1073741824.0 - 1.0
+                        def lerp(a, b, t): return a + t * (b - a)
+                        return lerp(
+                            lerp(lerp(h(ix,iy,iz),   h(ix+1,iy,iz),   ux),
+                                 lerp(h(ix,iy+1,iz), h(ix+1,iy+1,iz), ux), uy),
+                            lerp(lerp(h(ix,iy,iz+1),   h(ix+1,iy,iz+1),   ux),
+                                 lerp(h(ix,iy+1,iz+1), h(ix+1,iy+1,iz+1), ux), uy),
+                            uz)
+                    _tt = time.time() * ps.turbulence_speed
+                    _tf = ps.turbulence_frequency
+                    _ts = ps.turbulence_strength
+                    px = particle_obj.location.x * _tf
+                    py = particle_obj.location.y * _tf
+                    pz = particle_obj.location.z * _tf
+                    velocity.x += _preview_noise(px,        py,        pz        + _tt) * _ts * dt
+                    velocity.y += _preview_noise(px + 31.7, py,        pz        + _tt) * _ts * dt
+                    velocity.z += _preview_noise(px,        py + 57.3, pz        + _tt) * _ts * dt
+
                 # Position integration + collision (ground plane Z=0 for preview)
                 if enable_coll:
                     next_pos = particle_obj.location + velocity * dt
                     if next_pos.z < 0:
-                        velocity.z = -velocity.z * bounce
-                        next_pos.z = 0.01
+                        if ps.stop_on_collision:
+                            velocity.x = velocity.y = velocity.z = 0.0
+                            next_pos.z = 0.0
+                        else:
+                            velocity.z = -velocity.z * bounce
+                            next_pos.z = 0.01
                     particle_obj.location = next_pos
                 else:
                     particle_obj.location += velocity * dt
@@ -1585,7 +1927,7 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                         cr, cg, cb = 1.0, 1.0, 1.0
 
                     if ps.enable_alpha:
-                        t_a = (life_ratio - p_alpha_t0) / (p_alpha_t1 - p_alpha_t0)
+                        t_a = (life_ratio - p_alpha_t0) / max(p_alpha_t1 - p_alpha_t0, 0.0001)
                         t_a = max(0.0, min(1.0, t_a))
                         if _preview_alpha_curve:
                             # Curve mode: Y value IS the alpha
@@ -1602,31 +1944,37 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
                     particle_obj.color = (cr, cg, cb, ca)
 
-                # Billboard: per-particle look-at toward the viewport eye.
-                # position, build a full orthonormal XYZ basis, apply as matrix.
+                # Billboard orientation — mirrors the runtime's two-method system.
                 if is_billboard:
-                    for area in context.screen.areas:
-                        if area.type == 'VIEW_3D':
-                            rv3d = area.spaces.active.region_3d
-                            if rv3d:
-                                eye     = rv3d.view_matrix.inverted().translation
-                                to_cam  = (eye - particle_obj.location).normalized()
-                                world_z = Vector((0.0, 0.0, 1.0))
-                                # Gimbal guard: if to_cam nearly parallel to Z use Y as up ref
-                                world_up = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(world_z)) > 0.999 else world_z
-                                # right = up_ref × to_cam  (X axis of billboard)
-                                right   = world_up.cross(to_cam).normalized()
-                                # up = to_cam × right  (Z axis of billboard, true up)
-                                up      = to_cam.cross(right).normalized()
-                                # Build column-major rotation matrix:
-                                # col0=right(X), col1=to_cam(Y, faces camera), col2=up(Z)
-                                rot_mat = Matrix((
-                                    (right.x,  to_cam.x,  up.x),
-                                    (right.y,  to_cam.y,  up.y),
-                                    (right.z,  to_cam.z,  up.z),
-                                ))
-                                particle_obj.rotation_euler = rot_mat.to_euler()
-                            break
+                    if ps.billboard_facing == 'LOOK_AT' and _cam_eye is not None:
+                        # Per-particle 3D look-at: build rotation from particle→camera vector.
+                        world_z = Vector((0.0, 0.0, 1.0))
+                        to_cam  = (_cam_eye - particle_obj.location).normalized()
+                        ref     = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(world_z)) > 0.999 else world_z
+                        right   = ref.cross(to_cam).normalized()
+                        up      = to_cam.cross(right).normalized()
+                        # col0=right(X), col1=to_cam(Y/normal), col2=up(Z)
+                        align_mat = Matrix((
+                            (right.x, to_cam.x, up.x),
+                            (right.y, to_cam.y, up.y),
+                            (right.z, to_cam.z, up.z),
+                        ))
+                    elif _cam_rot_mat is not None:
+                        # CAM_ROT (default): shared camera matrix for all particles.
+                        align_mat = _cam_rot_mat
+                    else:
+                        align_mat = None
+
+                    if align_mat is not None:
+                        if ps.billboard_roll_enabled:
+                            angular_velocity = Vector(angular_velocity)
+                            angular_velocity.y += ps.billboard_roll_speed * math.pi * 2.0 * dt
+                            roll_y = rotation[1] + angular_velocity.y
+                            roll_mat = Matrix.Rotation(roll_y, 3, 'Y')
+                            rotation = (rotation[0], roll_y, rotation[2])
+                            particle_obj.rotation_euler = (align_mat @ roll_mat).to_euler()
+                        else:
+                            particle_obj.rotation_euler = align_mat.to_euler()
 
                 # Rotation (only for MESH type — billboard handles its own orientation)
                 if not is_billboard:
@@ -1697,19 +2045,33 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
         # Limit max particles
         if len(self._particles) >= ps.max_particles:
             old_particle = self._particles.pop(0)
-            bpy.data.objects.remove(old_particle[0], do_unlink=True)
+            try:
+                if old_particle[0] and old_particle[0].name in bpy.data.objects:
+                    bpy.data.objects.remove(old_particle[0], do_unlink=True)
+            except ReferenceError:
+                pass  # Object already removed
 
         # Calculate spawn position based on emission shape
         emission_shape = ps.emission_shape
         mat = obj.matrix_world
+        emit_from = ps.emit_from
 
         if emission_shape == 'BOX':
             box_size = ps.emission_box_size
-            local_offset = Vector((
-                (random.random() - 0.5) * box_size[0],
-                (random.random() - 0.5) * box_size[1],
-                (random.random() - 0.5) * box_size[2]
-            ))
+            if emit_from == 'SURFACE':
+                # Pick one of 6 faces, then random point on that face
+                axis = random.randint(0, 2)
+                side = random.choice([-1, 1])
+                half = [box_size[i] * 0.5 for i in range(3)]
+                coords = [(random.random() - 0.5) * box_size[i] for i in range(3)]
+                coords[axis] = side * half[axis]
+                local_offset = Vector(coords)
+            else:  # VOLUME
+                local_offset = Vector((
+                    (random.random() - 0.5) * box_size[0],
+                    (random.random() - 0.5) * box_size[1],
+                    (random.random() - 0.5) * box_size[2]
+                ))
             spawn_pos = mat @ local_offset
 
         elif emission_shape == 'SPHERE':
@@ -1718,28 +2080,58 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             v = random.random()
             theta = 2 * math.pi * u
             phi   = math.acos(2 * v - 1)
-            r     = radius * (random.random() ** (1.0 / 3.0))
+            sin_phi = math.sin(phi)
+            if emit_from == 'SURFACE':
+                r = radius
+            else:  # VOLUME
+                r = radius * (random.random() ** (1.0 / 3.0))
             local_offset = Vector((
-                r * math.sin(phi) * math.cos(theta),
-                r * math.sin(phi) * math.sin(theta),
+                r * sin_phi * math.cos(theta),
+                r * sin_phi * math.sin(theta),
                 r * math.cos(phi)
             ))
             spawn_pos = mat @ local_offset
 
-        elif emission_shape == 'CONE':
-            # Random point within cone volume — tip at emitter origin, opening along +Z
-            cone_r = ps.emission_cone_radius
-            cone_h = ps.emission_cone_height
-            # Pick a random height, then a random radius proportional to that height
-            h_frac  = random.random()                           # 0=tip, 1=base
-            r_max   = cone_r * h_frac                          # radius at this height
-            r       = r_max * math.sqrt(random.random())       # uniform disk sampling
-            angle   = random.random() * 2.0 * math.pi
+        elif emission_shape == 'HEMISPHERE':
+            # Upper half-sphere (Z >= 0). Uses rejection-free formula:
+            # phi in [0, pi/2] gives the upper hemisphere.
+            radius = ps.emission_hemisphere_radius
+            theta  = random.random() * 2.0 * math.pi
+            # cos(phi) uniform in [0,1] gives uniform surface on upper hemisphere
+            cos_phi = random.random()
+            sin_phi = math.sqrt(1.0 - cos_phi * cos_phi)
+            if emit_from == 'SURFACE':
+                r = radius
+            else:  # VOLUME
+                r = radius * (random.random() ** (1.0 / 3.0))
             local_offset = Vector((
-                r * math.cos(angle),
-                r * math.sin(angle),
-                cone_h * h_frac
+                r * sin_phi * math.cos(theta),
+                r * sin_phi * math.sin(theta),
+                r * cos_phi
             ))
+            spawn_pos = mat @ local_offset
+
+        elif emission_shape == 'CONE':
+            cone_r  = ps.emission_cone_radius
+            cone_h  = ps.emission_cone_height
+            cone_br = ps.emission_cone_base_radius
+            if emit_from == 'BASE':
+                # Uniform disk at Z=0 (the bottom circle at the emitter origin)
+                base_r = cone_br if cone_br > 0.0 else cone_r
+                r      = base_r * math.sqrt(random.random())
+                angle  = random.random() * 2.0 * math.pi
+                local_offset = Vector((r * math.cos(angle), r * math.sin(angle), 0.0))
+            elif emit_from == 'SURFACE':
+                h_frac = math.sqrt(random.random())
+                r      = cone_r * h_frac
+                angle  = random.random() * 2.0 * math.pi
+                local_offset = Vector((r * math.cos(angle), r * math.sin(angle), cone_h * h_frac))
+            else:  # VOLUME
+                h_frac  = random.random()
+                r_max   = cone_r * h_frac
+                r       = r_max * math.sqrt(random.random())
+                angle   = random.random() * 2.0 * math.pi
+                local_offset = Vector((r * math.cos(angle), r * math.sin(angle), cone_h * h_frac))
             spawn_pos = mat @ local_offset
 
         elif emission_shape == 'RING':
@@ -1798,7 +2190,12 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             (random.random() - 0.5) * 2.0 * ps.velocity_random,
             (random.random() - 0.5) * 2.0 * ps.velocity_random
         ))
-        velocity = base_vel + random_offset
+        local_vel = base_vel + random_offset
+        # LOCAL space: rotate velocity by emitter orientation, matching runtime behaviour
+        if ps.simulation_space == 'LOCAL':
+            velocity = mat.to_3x3() @ local_vel
+        else:
+            velocity = local_vel
 
         # Calculate lifetime
         lifetime = ps.lifetime * (1.0 + (random.random() - 0.5) * ps.lifetime_random)
@@ -1871,8 +2268,13 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
         # Clean up all particles
         if self._particles:
-            for particle_obj, *_ in self._particles:
-                bpy.data.objects.remove(particle_obj, do_unlink=True)
+            for particle_data in self._particles:
+                particle_obj = particle_data[0]
+                try:
+                    if particle_obj and particle_obj.name in bpy.data.objects:
+                        bpy.data.objects.remove(particle_obj, do_unlink=True)
+                except ReferenceError:
+                    pass
         self._particles = []
 
         # Clean up shared billboard mesh data block
@@ -2016,7 +2418,8 @@ class Particle:
                  'pool_idx',
                  'orbit_angle', 'orbit_speed', 'orbit_radius',
                  'orbit_center', 'orbit_basis_u', 'orbit_basis_v',
-                 'roll_angle', 'roll_speed')
+                 'roll_angle', 'roll_speed',
+                 'is_stopped')
     def __init__(self):
         self.position        = Vector((0.0, 0.0, 0.0))
         self.velocity        = Vector((0.0, 0.0, 0.0))
@@ -2037,6 +2440,7 @@ class Particle:
         self.orbit_basis_v   = Vector((0.0, 1.0, 0.0))
         self.roll_angle      = 0.0
         self.roll_speed      = 0.0
+        self.is_stopped      = False
 class ParticleSystem:
     __slots__ = (
         # Identity & pool
@@ -2044,13 +2448,13 @@ class ParticleSystem:
         'particle_template', 'time_since_emit', 'burst_triggered', 'props',
         # Cached frame constants — hoisted out of hot loop
         '_props_raw',
-        '_grav', '_is_local', '_is_force', '_is_billboard',
+        '_grav', '_is_local', '_parent_with_emitter', '_is_force', '_is_billboard',
         '_acc', '_acc_per_sec',
         '_lifetime', '_lifetime_random',
         '_start_velocity', '_velocity_random', '_emission_shape',
         '_size_start', '_size_delta', '_size_curve',
         '_drag_start', '_drag_end', '_resistance',
-        '_enable_collision', '_bounce',
+        '_enable_collision', '_bounce', '_stop_on_collision',
         '_enable_color', '_color_start', '_color_end', '_color_curve',
         '_color_t_start', '_color_t_end',
         '_enable_alpha', '_start_alpha', '_end_alpha', '_alpha_t_start', '_alpha_t_end', '_alpha_curve',
@@ -2059,7 +2463,7 @@ class ParticleSystem:
         # Turbulence
         '_turb_enabled', '_turb_strength', '_turb_frequency', '_turb_speed', '_turb_time',
         # LOD
-        '_lod_enabled', '_lod_level', '_lod_start', '_lod_table',
+        '_lod_enabled', '_lod_level', '_lod_start', '_lod_table', '_lod_levels_count',
         # System Launcher
         '_launcher_enabled', '_launcher_dist', '_launcher_prewarm',
         '_launcher_active_thresh',  # precomputed: last LOD dist or launcher_dist
@@ -2072,6 +2476,12 @@ class ParticleSystem:
         '_orbit_basis_u', '_orbit_basis_v',   # cached basis vectors for ORBIT mode
         # Billboard Roll
         '_bb_roll_enabled', '_bb_roll_speed', '_bb_roll_random',
+        # Billboard facing method: 'CAM_ROT' | 'LOOK_AT'
+        '_bb_facing',
+        # Sub-Emitter (on-death, on-birth, on-collision)
+        '_sub_emitter_enabled', '_sub_emitter_name', '_sub_emitter_inherit_vel',
+        '_sub_birth_enabled',   '_sub_birth_name',   '_sub_birth_inherit_vel',
+        '_sub_coll_enabled',    '_sub_coll_name',    '_sub_coll_inherit_vel',
     )
 
     def __init__(self, emitter_obj):
@@ -2083,8 +2493,9 @@ class ParticleSystem:
         self.burst_triggered  = False
         self.props            = {}
         # Cached per-frame scalars hoisted out of the particle loop
-        self._is_local        = False
-        self._is_force        = False
+        self._is_local             = False
+        self._parent_with_emitter  = False
+        self._is_force             = False
         self._lifetime         = 2.0
         self._lifetime_random  = 0.0
         self._start_velocity   = (0.0, 0.0, 1.0)
@@ -2097,13 +2508,15 @@ class ParticleSystem:
         self._drag_start      = 0.0
         self._drag_end        = 0.0
         self._resistance      = 1.0
-        self._enable_collision = False
-        self._bounce          = 0.5
+        self._enable_collision  = False
+        self._bounce            = 0.5
+        self._stop_on_collision = False
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
         self._is_billboard    = False
         self._color_curve     = None   # None = Simple linear; list of floats = Curve mode
         self._turb_time       = 0.0  # Turbulence time accumulator
         self._lod_level       = 0    # Current active LOD level (0 = full sim)
+        self._lod_levels_count = 3   # How many LOD entries are active (1/2/3)
         # System Launcher
         self._launcher_enabled       = False
         self._launcher_dist          = 50.0
@@ -2127,6 +2540,18 @@ class ParticleSystem:
         self._bb_roll_enabled    = False
         self._bb_roll_speed      = 0.3
         self._bb_roll_random     = 0.2
+        # Billboard facing method
+        self._bb_facing          = 'CAM_ROT'
+        # Sub-Emitter
+        self._sub_emitter_enabled     = False
+        self._sub_emitter_name        = ''
+        self._sub_emitter_inherit_vel = False
+        self._sub_birth_enabled       = False
+        self._sub_birth_name          = ''
+        self._sub_birth_inherit_vel   = False
+        self._sub_coll_enabled        = False
+        self._sub_coll_name           = ''
+        self._sub_coll_inherit_vel    = False
         self.load_properties()
         self.create_particle_template()
         self.initialize_pool()
@@ -2153,106 +2578,126 @@ class ParticleSystem:
             g('ps_max_particles',       100),    # 10
             g('ps_emission_rate',       10.0),   # 11
             g('ps_emission_delay',      1.0),    # 12
-            g('ps_burst_count',         30),     # 11
-            g('ps_is_one_shot',         False),  # 12
-            g('ps_lifetime',            3.0),    # 13
-            g('ps_lifetime_random',     0.5),    # 14
-            g('ps_start_size',          0.1),    # 15
-            g('ps_end_size',            0.05),   # 16
-            g('ps_start_velocity_x',    0.0),    # 17
-            g('ps_start_velocity_y',    0.0),    # 18
-            g('ps_start_velocity_z',    2.0),    # 19
-            g('ps_velocity_random',     0.5),    # 20
-            g('ps_enable_gravity',      True),   # 21
-            g('ps_gravity_power',       -9.8),   # 22
-            g('ps_particle_mesh',       'ParticleSphere'),  # 23
-            g('ps_simulation_space',    'WORLD'),           # 24
-            g('ps_movement_type',       'SIMPLE'),          # 25
-            g('ps_force_x',             0.0),    # 26
-            g('ps_force_y',             0.0),    # 27
-            g('ps_force_z',             0.0),    # 28
-            g('ps_torque_x',            0.0),    # 29
-            g('ps_torque_y',            0.0),    # 30
-            g('ps_torque_z',            0.0),    # 31
-            g('ps_drag_enabled',        False),  # 32
-            g('ps_drag_start',           0.0),    # 33
-            g('ps_drag_end',             0.5),    # 34
-            g('ps_resistance',           1.0),    # 35
-            g('ps_enable_collision',    False),  # 36
-            g('ps_bounce_strength',     0.5),    # 39
-            g('ps_rotation_x',          0.0),    # 40
-            g('ps_rotation_y',          0.0),    # 41
-            g('ps_rotation_z',          0.0),    # 42
-            g('ps_particle_type',       'MESH'), # 38
-            g('ps_billboard_template',  '  '),    # 39
-            g('ps_color_start_r',       1.0),    # 40
-            g('ps_color_start_g',       1.0),    # 41
-            g('ps_color_start_b',       1.0),    # 42
-            g('ps_color_end_r',         1.0),    # 43
-            g('ps_color_end_g',         0.0),    # 44
-            g('ps_color_end_b',         0.0),    # 45
-            g('ps_color_start_time',    0.0),    # 46
-            g('ps_color_end_time',      10.0),   # 47
-            g('ps_start_alpha',         1.0),    # 48
-            g('ps_end_alpha',            0.0),    # 49
-            g('ps_alpha_start_time',     0.0),    # 50
-            g('ps_alpha_end_time',       10.0),   # 51
-            g('ps_enable_color',        False),  # 52
-            g('ps_enable_alpha',        False),  # 53
-            g('ps_enable_turb',         False),  # 54
-            g('ps_turb_strength',       0.5),    # 60
-            g('ps_turb_frequency',      0.5),    # 61
-            g('ps_turb_speed',          0.5),    # 62
-            g('ps_enable_lod',          False),  # 55
-            g('ps_lod_start',           20.0),   # 56
-            g('ps_lod1_dist',           40.0),   # 57
-            g('ps_lod1_max',            50),     # 58
-            g('ps_lod1_rate',           10.0),   # 59
-            g('ps_lod1_burst',          15),     # 60
-            g('ps_lod1_no_turb',        False),  # 69
-            g('ps_lod1_no_coll',        False),  # 70
-            g('ps_lod1_no_emit',        False),  # 71
-            g('ps_lod1_destroy',        False),  # 72
-            g('ps_lod2_dist',           80.0),   # 65
-            g('ps_lod2_max',            20),     # 66
-            g('ps_lod2_rate',           5.0),    # 67
-            g('ps_lod2_burst',          8),      # 68
-            g('ps_lod2_no_turb',        True),   # 69
-            g('ps_lod2_no_coll',        True),   # 70
-            g('ps_lod2_no_emit',        False),  # 71
-            g('ps_lod2_destroy',        False),  # 72
-            g('ps_lod3_dist',           150.0),  # 73
-            g('ps_lod3_max',            5),      # 74
-            g('ps_lod3_rate',           1.0),    # 75
-            g('ps_lod3_burst',          3),      # 76
-            g('ps_lod3_no_turb',        True),   # 85
-            g('ps_lod3_no_coll',        True),   # 86
-            g('ps_lod3_no_emit',        True),   # 87
-            g('ps_lod3_destroy',        True),   # 88
+            g('ps_burst_count',         30),     # 13
+            g('ps_is_one_shot',         False),  # 14
+            g('ps_lifetime',            3.0),    # 15
+            g('ps_lifetime_random',     0.5),    # 16
+            g('ps_start_size',          0.1),    # 17
+            g('ps_end_size',            0.05),   # 18
+            g('ps_start_velocity_x',    0.0),    # 19
+            g('ps_start_velocity_y',    0.0),    # 20
+            g('ps_start_velocity_z',    2.0),    # 21
+            g('ps_velocity_random',     0.5),    # 22
+            g('ps_enable_gravity',      True),   # 23
+            g('ps_gravity_power',       -9.8),   # 24
+            g('ps_particle_mesh',       'ParticleSphere'),  # 25
+            g('ps_simulation_space',    'WORLD'),           # 26
+            g('ps_parent_with_emitter', False),             # 27
+            g('ps_movement_type',       'SIMPLE'),          # 28
+            g('ps_force_x',             0.0),    # 29
+            g('ps_force_y',             0.0),    # 30
+            g('ps_force_z',             0.0),    # 31
+            g('ps_torque_x',            0.0),    # 32
+            g('ps_torque_y',            0.0),    # 33
+            g('ps_torque_z',            0.0),    # 34
+            g('ps_drag_enabled',        False),  # 35
+            g('ps_drag_start',           0.0),   # 36
+            g('ps_drag_end',             0.5),   # 37
+            g('ps_resistance',           1.0),   # 38
+            g('ps_enable_collision',    False),  # 39
+            g('ps_bounce_strength',     0.5),    # 40
+            g('ps_stop_on_collision',   False),  # 41
+            g('ps_rotation_x',          0.0),    # 42
+            g('ps_rotation_y',          0.0),    # 43
+            g('ps_rotation_z',          0.0),    # 44
+            g('ps_particle_type',       'MESH'), # 45
+            g('ps_billboard_template',  '  '),   # 46
+            g('ps_color_start_r',       1.0),    # 47
+            g('ps_color_start_g',       1.0),    # 48
+            g('ps_color_start_b',       1.0),    # 49
+            g('ps_color_end_r',         1.0),    # 50
+            g('ps_color_end_g',         0.0),    # 51
+            g('ps_color_end_b',         0.0),    # 52
+            g('ps_color_start_time',    0.0),    # 53
+            g('ps_color_end_time',      10.0),   # 54
+            g('ps_start_alpha',         1.0),    # 55
+            g('ps_end_alpha',            0.0),   # 56
+            g('ps_alpha_start_time',     0.0),   # 57
+            g('ps_alpha_end_time',       10.0),  # 58
+            g('ps_enable_color',        False),  # 59
+            g('ps_enable_alpha',        False),  # 60
+            g('ps_enable_turb',         False),  # 61
+            g('ps_turb_strength',       0.5),    # 62
+            g('ps_turb_frequency',      0.5),    # 63
+            g('ps_turb_speed',          0.5),    # 64
+            g('ps_enable_lod',          False),  # 65
+            g('ps_lod_start',           20.0),   # 66
+            g('ps_lod1_dist',           40.0),   # 67
+            g('ps_lod1_max',            50),     # 68
+            g('ps_lod1_rate',           10.0),   # 69
+            g('ps_lod1_burst',          15),     # 70
+            g('ps_lod1_no_turb',        False),  # 71
+            g('ps_lod1_no_coll',        False),  # 72
+            g('ps_lod1_no_emit',        False),  # 73
+            g('ps_lod1_destroy',        False),  # 74
+            g('ps_lod2_dist',           80.0),   # 75
+            g('ps_lod2_max',            20),     # 76
+            g('ps_lod2_rate',           5.0),    # 77
+            g('ps_lod2_burst',          8),      # 78
+            g('ps_lod2_no_turb',        True),   # 79
+            g('ps_lod2_no_coll',        True),   # 80
+            g('ps_lod2_no_emit',        False),  # 81
+            g('ps_lod2_destroy',        False),  # 82
+            g('ps_lod3_dist',           150.0),  # 83
+            g('ps_lod3_max',            5),      # 84
+            g('ps_lod3_rate',           1.0),    # 85
+            g('ps_lod3_burst',          3),      # 86
+            g('ps_lod3_no_turb',        True),   # 87
+            g('ps_lod3_no_coll',        True),   # 88
+            g('ps_lod3_no_emit',        True),   # 89
+            g('ps_lod3_destroy',        True),   # 90
             # System Launcher
-            g('ps_launcher_enabled',    False),  # 89
-            g('ps_launcher_dist',       50.0),   # 90
-            g('ps_launcher_prewarm',    70.0),   # 91
+            g('ps_launcher_enabled',    False),  # 91
+            g('ps_launcher_dist',       50.0),   # 92
+            g('ps_launcher_prewarm',    70.0),   # 93
             # Orbit
-            g('ps_orbit_center',        'EMITTER'),  # 92
-            g('ps_orbit_axis_x',        False),      # 93
-            g('ps_orbit_axis_y',        False),      # 94
-            g('ps_orbit_axis_z',        True),       # 95
-            g('ps_orbit_speed',         0.5),        # 96
-            g('ps_orbit_speed_random',  0.0),        # 97
-            g('ps_orbit_radius',        2.0),        # 98
-            g('ps_orbit_radius_random', 0.0),        # 99
-            g('ps_orbit_axis_inverse',  False),      # 100
+            g('ps_orbit_center',        'EMITTER'),  # 94
+            g('ps_orbit_axis_x',        False),      # 95
+            g('ps_orbit_axis_y',        False),      # 96
+            g('ps_orbit_axis_z',        True),       # 97
+            g('ps_orbit_speed',         0.5),        # 98
+            g('ps_orbit_speed_random',  0.0),        # 99
+            g('ps_orbit_radius',        2.0),        # 100
+            g('ps_orbit_radius_random', 0.0),        # 101
+            g('ps_orbit_axis_inverse',  False),      # 102
             # Billboard Roll
-            g('ps_bb_roll_enabled',     False),      # 101
-            g('ps_bb_roll_speed',       0.3),        # 102
-            g('ps_bb_roll_random',      0.2),        # 103
-            g('ps_color_curve',         '  '),        # 104 — baked curve samples, '  ' = Simple
-            g('ps_size_curve',          '  '),        # 105 — baked size curve, '  ' = Simple
-            g('ps_alpha_curve',         '  '),        # 106 — baked alpha curve, '  ' = Simple
-            g('ps_emission_ring_radius', 1.0),        # 107
-            g('ps_emission_ring_width',  0.1),        # 108
-            g('ps_orbit_tilt',          0.0),         # 109
+            g('ps_bb_roll_enabled',     False),      # 103
+            g('ps_bb_roll_speed',       0.3),        # 104
+            g('ps_bb_roll_random',      0.2),        # 105
+            g('ps_color_curve',         '  '),       # 106 — baked curve samples, '  ' = Simple
+            g('ps_size_curve',          '  '),       # 107 — baked size curve, '  ' = Simple
+            g('ps_alpha_curve',         '  '),       # 108 — baked alpha curve, '  ' = Simple
+            g('ps_emission_ring_radius', 1.0),       # 109
+            g('ps_emission_ring_width',  0.1),       # 110
+            g('ps_orbit_tilt',                0.0),        # 111
+            g('ps_emit_from',                 'VOLUME'),   # 112
+            g('ps_emission_hemisphere_radius', 1.0),       # 113
+            g('ps_emission_cone_base_radius',  0.0),       # 114
+            g('ps_lod_levels',                '3'),        # 115 — '1'/'2'/'3'
+            g('ps_color_mode',                'SIMPLE'),   # 116 — 'SIMPLE'/'CURVE'
+            g('ps_alpha_mode',                'SIMPLE'),   # 117
+            g('ps_size_mode',                 'SIMPLE'),   # 118
+            g('ps_bb_facing',                 'CAM_ROT'),  # 119 — 'CAM_ROT'/'LOOK_AT'
+            # Sub-Emitter
+            g('ps_sub_emitter_enabled',       False),      # 120
+            g('ps_sub_emitter',               ' '),         # 121 — name of sub-emitter object (' ' = none)
+            g('ps_sub_emitter_inherit_vel',   False),      # 122
+            g('ps_sub_birth_enabled',         False),      # 123
+            g('ps_sub_birth',                 ' '),         # 124
+            g('ps_sub_birth_inherit_vel',     False),      # 125
+            g('ps_sub_coll_enabled',          False),      # 126
+            g('ps_sub_coll',                  ' '),         # 127
+            g('ps_sub_coll_inherit_vel',      False),      # 128
         )
 
     def _build_props_from_raw(self, r):
@@ -2267,8 +2712,8 @@ class ParticleSystem:
             'emission_sphere_radius': r[7],
             'emission_cone_radius':   r[8],
             'emission_cone_height':   r[9],
-            'emission_ring_radius':   r[107],
-            'emission_ring_width':    r[108],
+            'emission_ring_radius':   r[109],
+            'emission_ring_width':    r[110],
             'max_particles':          r[10],
             'emission_rate':          r[11],
             'emission_delay':         r[12],
@@ -2284,80 +2729,102 @@ class ParticleSystem:
             'gravity_power':          r[24],
             'particle_mesh':          r[25],
             'simulation_space':       r[26],
-            'movement_type':          r[27],
-            'force':                 (r[28], r[29], r[30]),
-            'torque':                (r[31], r[32], r[33]),
-            'drag_enabled':           r[34],
-            'drag_start':             r[35],
-            'drag_end':               r[36],
-            'resistance':             r[37],
-            'enable_collision':       r[38],
-            'bounce_strength':        r[39],
-            'rotation':              (r[40], r[41], r[42]),
-            'particle_type':          r[43],
-            'billboard_template':     r[44],
-            'color_start':           (r[45], r[46], r[47]),
-            'color_end':             (r[48], r[49], r[50]),
-            'color_start_time':       r[51],
-            'color_end_time':         r[52],
-            'start_alpha':            r[53],
-            'end_alpha':              r[54],
-            'alpha_start_time':       r[55],
-            'alpha_end_time':         r[56],
-            'enable_color':           r[57],
-            'enable_alpha':           r[58],
-            'enable_turbulence':      r[59],
-            'turb_strength':          r[60],
-            'turb_frequency':         r[61],
-            'turb_speed':             r[62],
-            'enable_lod':             r[63],
-            'lod_start':              r[64],
-            'lod1_dist':              r[65],
-            'lod1_max':               r[66],
-            'lod1_rate':              r[67],
-            'lod1_burst':             r[68],
-            'lod1_no_turb':           r[69],
-            'lod1_no_coll':           r[70],
-            'lod1_no_emit':           r[71],
-            'lod1_destroy':           r[72],
-            'lod2_dist':              r[73],
-            'lod2_max':               r[74],
-            'lod2_rate':              r[75],
-            'lod2_burst':             r[76],
-            'lod2_no_turb':           r[77],
-            'lod2_no_coll':           r[78],
-            'lod2_no_emit':           r[79],
-            'lod2_destroy':           r[80],
-            'lod3_dist':              r[81],
-            'lod3_max':               r[82],
-            'lod3_rate':              r[83],
-            'lod3_burst':             r[84],
-            'lod3_no_turb':           r[85],
-            'lod3_no_coll':           r[86],
-            'lod3_no_emit':           r[87],
-            'lod3_destroy':           r[88],
+            'parent_with_emitter':    r[27],
+            'movement_type':          r[28],
+            'force':                 (r[29], r[30], r[31]),
+            'torque':                (r[32], r[33], r[34]),
+            'drag_enabled':           r[35],
+            'drag_start':             r[36],
+            'drag_end':               r[37],
+            'resistance':             r[38],
+            'enable_collision':       r[39],
+            'bounce_strength':        r[40],
+            'stop_on_collision':      r[41],
+            'rotation':              (r[42], r[43], r[44]),
+            'particle_type':          r[45],
+            'billboard_template':     r[46],
+            'color_start':           (r[47], r[48], r[49]),
+            'color_end':             (r[50], r[51], r[52]),
+            'color_start_time':       r[53],
+            'color_end_time':         r[54],
+            'start_alpha':            r[55],
+            'end_alpha':              r[56],
+            'alpha_start_time':       r[57],
+            'alpha_end_time':         r[58],
+            'enable_color':           r[59],
+            'enable_alpha':           r[60],
+            'enable_turbulence':      r[61],
+            'turb_strength':          r[62],
+            'turb_frequency':         r[63],
+            'turb_speed':             r[64],
+            'enable_lod':             r[65],
+            'lod_start':              r[66],
+            'lod1_dist':              r[67],
+            'lod1_max':               r[68],
+            'lod1_rate':              r[69],
+            'lod1_burst':             r[70],
+            'lod1_no_turb':           r[71],
+            'lod1_no_coll':           r[72],
+            'lod1_no_emit':           r[73],
+            'lod1_destroy':           r[74],
+            'lod2_dist':              r[75],
+            'lod2_max':               r[76],
+            'lod2_rate':              r[77],
+            'lod2_burst':             r[78],
+            'lod2_no_turb':           r[79],
+            'lod2_no_coll':           r[80],
+            'lod2_no_emit':           r[81],
+            'lod2_destroy':           r[82],
+            'lod3_dist':              r[83],
+            'lod3_max':               r[84],
+            'lod3_rate':              r[85],
+            'lod3_burst':             r[86],
+            'lod3_no_turb':           r[87],
+            'lod3_no_coll':           r[88],
+            'lod3_no_emit':           r[89],
+            'lod3_destroy':           r[90],
             # System Launcher
-            'launcher_enabled':       r[89],
-            'launcher_dist':          r[90],
-            'launcher_prewarm':       r[91],
+            'launcher_enabled':       r[91],
+            'launcher_dist':          r[92],
+            'launcher_prewarm':       r[93],
             # Orbit
-            'orbit_center':           r[92],
-            'orbit_axis_x':           r[93],
-            'orbit_axis_y':           r[94],
-            'orbit_axis_z':           r[95],
-            'orbit_speed':            r[96],
-            'orbit_speed_random':     r[97],
-            'orbit_radius':           r[98],
-            'orbit_radius_random':    r[99],
-            'orbit_axis_inverse':     r[100],
-            'orbit_tilt':             r[109],
+            'orbit_center':           r[94],
+            'orbit_axis_x':           r[95],
+            'orbit_axis_y':           r[96],
+            'orbit_axis_z':           r[97],
+            'orbit_speed':            r[98],
+            'orbit_speed_random':     r[99],
+            'orbit_radius':           r[100],
+            'orbit_radius_random':    r[101],
+            'orbit_axis_inverse':     r[102],
+            'orbit_tilt':                   r[111],
+            'emit_from':                    r[112],
+            'emission_hemisphere_radius':   r[113],
+            'emission_cone_base_radius':    r[114],
             # Billboard Roll
-            'bb_roll_enabled':        r[101],
-            'bb_roll_speed':          r[102],
-            'bb_roll_random':         r[103],
-            'color_curve':            r[104],
-            'size_curve':             r[105],
-            'alpha_curve':            r[106],
+            'bb_roll_enabled':        r[103],
+            'bb_roll_speed':          r[104],
+            'bb_roll_random':         r[105],
+            'color_curve':            r[106],
+            'size_curve':             r[107],
+            'alpha_curve':            r[108],
+            # LOD level count and mode flags
+            'lod_levels':             r[115],
+            'color_mode':             r[116],
+            'alpha_mode':             r[117],
+            'size_mode':              r[118],
+            # Billboard facing method
+            'bb_facing':              r[119],
+            # Sub-Emitter
+            'sub_emitter_enabled':    r[120],
+            'sub_emitter':            r[121],
+            'sub_emitter_inherit_vel': r[122],
+            'sub_birth_enabled':      r[123],
+            'sub_birth':              r[124],
+            'sub_birth_inherit_vel':  r[125],
+            'sub_coll_enabled':       r[126],
+            'sub_coll':               r[127],
+            'sub_coll_inherit_vel':   r[128],
         }
 
     def load_properties(self):
@@ -2381,7 +2848,8 @@ class ParticleSystem:
         '''Hoist props that are constant for all particles this frame.
         Called once per update() instead of once per particle.'''
         p = self.props
-        self._is_local   = (p['simulation_space'] == 'LOCAL')
+        self._is_local            = (p['simulation_space'] == 'LOCAL')
+        self._parent_with_emitter = p['parent_with_emitter'] and self._is_local
         self._is_force   = (p['movement_type']    == 'FORCE')
         self._lifetime        = p['lifetime']
         self._lifetime_random = p['lifetime_random']
@@ -2392,8 +2860,9 @@ class ParticleSystem:
         self._size_start = p['start_size']
         self._size_delta = p['end_size'] - p['start_size']
         self._size_curve = self._parse_curve(p.get('size_curve', ''))
-        self._enable_collision = p['enable_collision']
-        self._bounce     = p['bounce_strength']
+        self._enable_collision  = p['enable_collision']
+        self._bounce            = p['bounce_strength']
+        self._stop_on_collision = p['stop_on_collision']
 
         grav_z = p['gravity_power'] if p['enable_gravity'] else 0.0
         grav_w = Vector((0.0, 0.0, grav_z))
@@ -2498,9 +2967,10 @@ class ParticleSystem:
         self._launcher_dist    = p['launcher_dist']
         self._launcher_prewarm = p['launcher_prewarm']
         # Precompute the active threshold once — avoids a tuple index lookup every frame.
-        # When LOD is on: last LOD level distance. When LOD is off: manual launcher dist.
+        # When LOD is on: last *active* LOD level distance. When LOD is off: manual launcher dist.
+        self._lod_levels_count = int(p.get('lod_levels', '3'))
         if self._lod_enabled:
-            self._launcher_active_thresh = self._lod_table[-1][0]
+            self._launcher_active_thresh = self._lod_table[self._lod_levels_count - 1][0]
         else:
             self._launcher_active_thresh = self._launcher_dist
 
@@ -2557,6 +3027,20 @@ class ParticleSystem:
         self._bb_roll_enabled = p['bb_roll_enabled']
         self._bb_roll_speed   = p['bb_roll_speed']
         self._bb_roll_random  = p['bb_roll_random']
+
+        # Billboard facing method — 'CAM_ROT' copies camera matrix, 'LOOK_AT' per-particle 3D
+        self._bb_facing = p.get('bb_facing', 'CAM_ROT')
+
+        # Sub-Emitter — name looked up in ParticleManager.systems at event time
+        self._sub_emitter_enabled     = p.get('sub_emitter_enabled',    False)
+        self._sub_emitter_name        = p.get('sub_emitter',            ' ').strip()
+        self._sub_emitter_inherit_vel = p.get('sub_emitter_inherit_vel', False)
+        self._sub_birth_enabled       = p.get('sub_birth_enabled',      False)
+        self._sub_birth_name          = p.get('sub_birth',              ' ').strip()
+        self._sub_birth_inherit_vel   = p.get('sub_birth_inherit_vel',  False)
+        self._sub_coll_enabled        = p.get('sub_coll_enabled',       False)
+        self._sub_coll_name           = p.get('sub_coll',               ' ').strip()
+        self._sub_coll_inherit_vel    = p.get('sub_coll_inherit_vel',   False)
 
     # ------------------------------------------------------------------
     # Turbulence noise
@@ -2643,17 +3127,33 @@ class ParticleSystem:
         return None
 
     def deactivate_particle(self, p):
-        '''Hide particle and return its index to the free stack in O(1).'''
-        p.is_active = False
+        '''Hide particle and return its index to the free stack in O(1).
+        If a sub-emitter is configured, fires a burst at the particle's death position.'''
+        # Capture position before zeroing the object — used for sub-emitter spawn
+        death_pos = p.position.copy() if self._sub_emitter_enabled else None
+        death_vel = p.velocity.copy() if (self._sub_emitter_enabled and self._sub_emitter_inherit_vel) else None
+
+        p.is_active  = False
+        p.is_stopped = False
         if p.obj:
             p.obj.worldScale = [0.0, 0.0, 0.0]
             p.obj.visible = False
         self.inactive_stack.append(p.pool_idx)
 
+        # Sub-emitter: burst from the death position
+        if self._sub_emitter_enabled and self._sub_emitter_name and self._sub_emitter_name.strip() and death_pos is not None:
+            try:
+                pm = logic._pm
+                sub_sys = pm.systems.get(self._sub_emitter_name)
+                if sub_sys is not None:
+                    sub_sys.emit_burst_at(death_pos, extra_vel=death_vel)
+            except Exception:
+                pass  # Never let sub-emitter errors kill the parent system
+
     # ------------------------------------------------------------------
     # Emission
     # ------------------------------------------------------------------
-    def emit_particle(self):
+    def emit_particle(self, override_pos=None, extra_vel=None):
         p = self.get_inactive_particle()
         if not p:
             return
@@ -2662,14 +3162,25 @@ class ParticleSystem:
         emitter_pos     = self.emitter.worldPosition
         emitter_ori     = self.emitter.worldOrientation
         spawn_local_offset = Vector((0.0, 0.0, 0.0))
+        emit_from = self.props.get('emit_from', 'VOLUME')
 
         if emission_shape == 'BOX':
             bx, by, bz = self.props['emission_box_size']
-            spawn_local_offset = Vector((
-                (_random() - 0.5) * bx,
-                (_random() - 0.5) * by,
-                (_random() - 0.5) * bz,
-            ))
+            if emit_from == 'SURFACE':
+                axis = int(_random() * 3)
+                side = 1.0 if _random() < 0.5 else -1.0
+                half = (bx * 0.5, by * 0.5, bz * 0.5)
+                coords = [(_random() - 0.5) * bx,
+                          (_random() - 0.5) * by,
+                          (_random() - 0.5) * bz]
+                coords[axis] = side * half[axis]
+                spawn_local_offset = Vector(coords)
+            else:  # VOLUME
+                spawn_local_offset = Vector((
+                    (_random() - 0.5) * bx,
+                    (_random() - 0.5) * by,
+                    (_random() - 0.5) * bz,
+                ))
             if self._is_local:
                 spawn_pos = emitter_pos + (emitter_ori @ spawn_local_offset)
             else:
@@ -2679,8 +3190,11 @@ class ParticleSystem:
             radius = self.props['emission_sphere_radius']
             theta  = 2.0 * _pi * _random()
             phi    = _acos(2.0 * _random() - 1.0)
-            r      = radius * (_random() ** (1.0 / 3.0))
             sin_phi = _sin(phi)
+            if emit_from == 'SURFACE':
+                r = radius
+            else:  # VOLUME
+                r = radius * (_random() ** (1.0 / 3.0))
             spawn_local_offset = Vector((
                 r * sin_phi * _cos(theta),
                 r * sin_phi * _sin(theta),
@@ -2691,19 +3205,53 @@ class ParticleSystem:
             else:
                 spawn_pos = emitter_pos + spawn_local_offset
 
-        elif emission_shape == 'CONE':
-            # Random point within cone volume — tip at emitter, opening along local +Z
-            cone_r = self.props['emission_cone_radius']
-            cone_h = self.props['emission_cone_height']
-            h_frac = _random()
-            r_max  = cone_r * h_frac
-            r      = r_max * _sqrt(_random())
-            angle  = _random() * 2.0 * _pi
+        elif emission_shape == 'HEMISPHERE':
+            radius  = self.props['emission_hemisphere_radius']
+            theta   = 2.0 * _pi * _random()
+            cos_phi = _random()          # uniform in [0,1] → upper hemisphere only
+            sin_phi = _sqrt(1.0 - cos_phi * cos_phi)
+            if emit_from == 'SURFACE':
+                r = radius
+            else:  # VOLUME
+                r = radius * (_random() ** (1.0 / 3.0))
             spawn_local_offset = Vector((
-                r * _cos(angle),
-                r * _sin(angle),
-                cone_h * h_frac,
+                r * sin_phi * _cos(theta),
+                r * sin_phi * _sin(theta),
+                r * cos_phi,
             ))
+            if self._is_local:
+                spawn_pos = emitter_pos + (emitter_ori @ spawn_local_offset)
+            else:
+                spawn_pos = emitter_pos + spawn_local_offset
+
+        elif emission_shape == 'CONE':
+            cone_r  = self.props['emission_cone_radius']
+            cone_h  = self.props['emission_cone_height']
+            cone_br = self.props['emission_cone_base_radius']
+            if emit_from == 'BASE':
+                base_r = cone_br if cone_br > 0.0 else cone_r
+                r      = base_r * _sqrt(_random())
+                angle  = _random() * 2.0 * _pi
+                spawn_local_offset = Vector((r * _cos(angle), r * _sin(angle), 0.0))
+            elif emit_from == 'SURFACE':
+                h_frac = _sqrt(_random())
+                r      = cone_r * h_frac
+                angle  = _random() * 2.0 * _pi
+                spawn_local_offset = Vector((
+                    r * _cos(angle),
+                    r * _sin(angle),
+                    cone_h * h_frac,
+                ))
+            else:  # VOLUME
+                h_frac = _random()
+                r_max  = cone_r * h_frac
+                r      = r_max * _sqrt(_random())
+                angle  = _random() * 2.0 * _pi
+                spawn_local_offset = Vector((
+                    r * _cos(angle),
+                    r * _sin(angle),
+                    cone_h * h_frac,
+                ))
             if self._is_local:
                 spawn_pos = emitter_pos + (emitter_ori @ spawn_local_offset)
             else:
@@ -2732,12 +3280,20 @@ class ParticleSystem:
             sv[2] + (_random() - 0.5) * 2.0 * vr,
         ))
         world_vel = (emitter_ori @ local_vel) if self._is_local else local_vel
+        # Parent mode uses local-space velocity so local_offset integrates correctly
+        spawn_vel = local_vel if self._parent_with_emitter else world_vel
 
         lifetime = self._lifetime * (1.0 + (_random() - 0.5) * self._lifetime_random)
 
+        # Sub-emitter override: replace spawn position and optionally add inherited velocity
+        if override_pos is not None:
+            spawn_pos = override_pos
+        if extra_vel is not None:
+            spawn_vel = spawn_vel + extra_vel
+
         # Reset particle state
         p.position.x = spawn_pos.x; p.position.y = spawn_pos.y; p.position.z = spawn_pos.z
-        p.velocity.x = world_vel.x; p.velocity.y = world_vel.y; p.velocity.z = world_vel.z
+        p.velocity.x = spawn_vel.x; p.velocity.y = spawn_vel.y; p.velocity.z = spawn_vel.z
         p.local_offset.x = spawn_local_offset.x
         p.local_offset.y = spawn_local_offset.y
         p.local_offset.z = spawn_local_offset.z
@@ -2747,6 +3303,7 @@ class ParticleSystem:
         p.rotation.x = 0.0; p.rotation.y = 0.0; p.rotation.z = 0.0
         p.angular_velocity.x = 0.0; p.angular_velocity.y = 0.0; p.angular_velocity.z = 0.0
         p.roll_angle = 0.0
+        p.is_stopped = False
         p.roll_speed = (self._bb_roll_speed
                         + (_random() - 0.5) * 2.0 * self._bb_roll_random) * 2.0 * _pi
         p.is_active = True
@@ -2790,12 +3347,34 @@ class ParticleSystem:
             p.obj.worldScale = [s, s, s]
             p.obj.visible = True
 
+        # Sub-emitter On Birth: burst at the spawn position of the new particle
+        if self._sub_birth_enabled and self._sub_birth_name:
+            try:
+                sub_sys = logic._pm.systems.get(self._sub_birth_name)
+                if sub_sys is not None:
+                    birth_vel = spawn_vel.copy() if self._sub_birth_inherit_vel else None
+                    sub_sys.emit_burst_at(spawn_pos, extra_vel=birth_vel)
+            except Exception:
+                pass
+
     def _emit_burst_lod(self, burst_count, max_particles):
         active_count = len(self.particle_pool) - len(self.inactive_stack)
         slots_free   = max(0, max_particles - active_count)
         count        = min(burst_count, slots_free)
         for _ in range(count):
             self.emit_particle()
+
+    def emit_burst_at(self, pos, extra_vel=None):
+        '''Spawn a burst of particles centred on `pos` (world space).
+        Called by a parent system's deactivate_particle when sub-emitter is enabled.
+        Respects the sub-emitter's own burst_count and max_particles cap.'''
+        burst_count  = self.props.get('burst_count',  1)
+        max_particles = self.props.get('max_particles', 100)
+        active_count = len(self.particle_pool) - len(self.inactive_stack)
+        slots_free   = max(0, max_particles - active_count)
+        count        = min(burst_count, slots_free)
+        for _ in range(count):
+            self.emit_particle(override_pos=pos, extra_vel=extra_vel)
 
     # ------------------------------------------------------------------
     # Main update
@@ -2918,8 +3497,10 @@ class ParticleSystem:
                 self._lod_level = 0
             else:
                 self._lod_level = 0
+                # Only iterate up to the configured number of LOD levels
+                active_table = self._lod_table[:self._lod_levels_count]
                 for lvl_idx, (lvl_dist, lvl_max, lvl_rate, lvl_burst,
-                              lvl_no_turb, lvl_ncoll, lvl_ne, lvl_destroy) in enumerate(self._lod_table):
+                              lvl_no_turb, lvl_ncoll, lvl_ne, lvl_destroy) in enumerate(active_table):
                     if dist >= lvl_dist:
                         self._lod_level = lvl_idx + 1
                         lod_no_turb     = lvl_no_turb
@@ -2977,14 +3558,17 @@ class ParticleSystem:
         # --- Particle update loop (hot path) ---
         acc              = self._acc
         is_force         = self._is_force
-        enable_collision = self._enable_collision and not lod_no_coll
-        bounce           = self._bounce
+        enable_collision  = self._enable_collision and not lod_no_coll
+        bounce            = self._bounce
+        stop_on_collision = self._stop_on_collision
         size_start       = self._size_start
         size_delta       = self._size_delta
         size_curve       = self._size_curve   # None = Simple; list = Curve
         rot_has_value    = self._rot_has_value
         is_billboard     = self._is_billboard
+        emitter_pos      = self.emitter.worldPosition
         emitter_ori      = self.emitter.worldOrientation
+        parent_emitter   = self._parent_with_emitter
 
         if is_force:
             torque_rad   = self._torque_rad
@@ -3013,8 +3597,15 @@ class ParticleSystem:
         is_orbit         = self._is_orbit
         orbit_two_pi     = 2.0 * _pi
 
-        # Billboard roll local
+        # Billboard roll + facing locals
         bb_roll_enabled  = self._bb_roll_enabled
+        bb_facing        = self._bb_facing          # 'CAM_ROT' | 'LOOK_AT'
+        _world_z         = Vector((0.0, 0.0, 1.0))  # used by LOOK_AT gimbal guard
+
+        # Sub-emitter collision locals — hoisted so hot loop avoids attribute lookups
+        sub_coll_enabled     = self._sub_coll_enabled
+        sub_coll_name        = self._sub_coll_name
+        sub_coll_inherit_vel = self._sub_coll_inherit_vel
 
         # Color & alpha locals — LOD overrides applied on top
         enable_color  = self._enable_color
@@ -3042,22 +3633,23 @@ class ParticleSystem:
             # Apply acceleration (gravity + optional force).
             # For orbit mode we skip this — orbit overwrites position directly.
             # Gravity drift along the free axis is handled inside the orbit branch.
-            if not is_orbit:
-                p.velocity += acc
+            if not p.is_stopped:
+                if not is_orbit:
+                    p.velocity += acc
 
-            # Drag over lifetime — interpolates Start→End across particle age
-            if drag_active:
-                life_r = p.age / p.lifetime
-                p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
+                # Drag over lifetime — interpolates Start→End across particle age
+                if drag_active:
+                    life_r = p.age / p.lifetime
+                    p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
 
-            # Turbulence — sample noise at particle world position
-            if turb_enabled:
-                px = p.position.x * turb_freq
-                py = p.position.y * turb_freq
-                pz = p.position.z * turb_freq
-                p.velocity.x += _noise(px,        py,        pz        + turb_time) * turb_strength * dt
-                p.velocity.y += _noise(px + 31.7, py,        pz        + turb_time) * turb_strength * dt
-                p.velocity.z += _noise(px,        py + 57.3, pz        + turb_time) * turb_strength * dt
+                # Turbulence — sample noise at particle world position
+                if turb_enabled:
+                    px = p.position.x * turb_freq
+                    py = p.position.y * turb_freq
+                    pz = p.position.z * turb_freq
+                    p.velocity.x += _noise(px,        py,        pz        + turb_time) * turb_strength * dt
+                    p.velocity.y += _noise(px + 31.7, py,        pz        + turb_time) * turb_strength * dt
+                    p.velocity.z += _noise(px,        py + 57.3, pz        + turb_time) * turb_strength * dt
 
             # Capture position BEFORE integration so the ray spans exactly
             # the segment the particle travels this frame (fixes one-frame-late
@@ -3067,7 +3659,7 @@ class ParticleSystem:
             # Position integration — orbit mode drives position directly from
             # angle+radius in the precomputed orbit plane (basis U/V vectors).
             # Non-orbit uses standard velocity integration.
-            if is_orbit:
+            if is_orbit and not p.is_stopped:
                 p.orbit_angle += p.orbit_speed * orbit_two_pi * dt
                 a  = p.orbit_angle
                 ca = _cos(a); sa = _sin(a)
@@ -3089,7 +3681,14 @@ class ParticleSystem:
                 p.position.y += p.velocity.y * dt
                 p.position.z += p.velocity.z * dt
             else:
-                p.position += p.velocity * dt
+                if parent_emitter:
+                    # Reference math from particle_system.py:
+                    # velocity integrates into local_offset (local space),
+                    # world position is rebuilt from emitter transform every frame.
+                    p.local_offset += p.velocity * dt
+                    p.position = emitter_pos + (emitter_ori @ p.local_offset)
+                else:
+                    p.position += p.velocity * dt
 
             # Collision — ray from pre-integration pos to post-integration pos.
             # rayCast(to, from, dist) — order matters.
@@ -3102,11 +3701,25 @@ class ParticleSystem:
                         distance     # max ray length (one frame of travel)
                     )
                     if hit_obj:
-                        dot = p.velocity.dot(hit_normal)
-                        p.velocity -= 2.0 * dot * hit_normal
-                        p.velocity *= bounce
-                        # Push off surface to prevent sinking
-                        p.position = hit_pos + hit_normal * 0.02
+                        if stop_on_collision:
+                            p.is_stopped = True
+                            p.velocity.x = 0.0; p.velocity.y = 0.0; p.velocity.z = 0.0
+                            p.position = hit_pos + hit_normal * 0.005
+                        else:
+                            dot = p.velocity.dot(hit_normal)
+                            p.velocity -= 2.0 * dot * hit_normal
+                            p.velocity *= bounce
+                            # Push off surface to prevent sinking
+                            p.position = hit_pos + hit_normal * 0.02
+                        # Sub-emitter On Collision
+                        if sub_coll_enabled and sub_coll_name:
+                            try:
+                                sub_sys = logic._pm.systems.get(sub_coll_name)
+                                if sub_sys is not None:
+                                    coll_vel = p.velocity.copy() if sub_coll_inherit_vel else None
+                                    sub_sys.emit_burst_at(hit_pos, extra_vel=coll_vel)
+                            except Exception:
+                                pass
 
             # Write to game object
             obj = p.obj
@@ -3161,23 +3774,38 @@ class ParticleSystem:
 
                     obj.color = [cr, cg, cb, alpha]
 
-                # Billboard: face the active camera every frame
+                # Billboard orientation — two methods selectable per emitter:
+                #
+                # CAM_ROT: copy the camera's own orientation + 90° X correction.
+                #   One matrix shared by all particles this frame — cheapest.
+                #   Best for flat/uniform effects (sparks, rain, debris).
+                #
+                # LOOK_AT: per-particle 3D look-at toward the camera position.
+                #   Builds right/up/forward from the particle→camera vector.
+                #   Slightly more expensive but gives correct depth layering for
+                #   volumetric effects like fire and smoke.
                 if is_billboard:
                     if bb_cam:
-                        cam_pos = bb_cam.worldPosition
-                        to_cam  = (cam_pos - p.position).normalized()
-                        # Gimbal-lock guard: if to_cam is nearly parallel to Z,
-                        # fall back to Y as the reference axis
-                        world_z = Vector((0.0, 0.0, 1.0))
-                        ref     = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(world_z)) > 0.999 else world_z
-                        right   = ref.cross(to_cam).normalized()
-                        up      = to_cam.cross(right).normalized()
-                        # col0=right(X), col1=to_cam(Y/normal), col2=up(Z)
-                        base_mat = Matrix((
-                            (right.x, to_cam.x, up.x),
-                            (right.y, to_cam.y, up.y),
-                            (right.z, to_cam.z, up.z),
-                        ))
+                        if bb_facing == 'LOOK_AT':
+                            # Per-particle: build rotation matrix that points
+                            # the plane's Y-normal (local forward) at the camera.
+                            to_cam = (bb_cam.worldPosition - p.position).normalized()
+                            # Gimbal-lock guard: if to_cam is nearly parallel to Z
+                            # fall back to Y as the reference up-vector
+                            ref   = Vector((0.0, 1.0, 0.0)) if abs(to_cam.dot(_world_z)) > 0.999 else _world_z
+                            right = ref.cross(to_cam).normalized()
+                            up    = to_cam.cross(right).normalized()
+                            # col0=right(X), col1=to_cam(Y/normal), col2=up(Z)
+                            base_mat = Matrix((
+                                (right.x, to_cam.x, up.x),
+                                (right.y, to_cam.y, up.y),
+                                (right.z, to_cam.z, up.z),
+                            ))
+                        else:  # CAM_ROT (default)
+                            # Shared matrix: camera orientation + 90° X correction
+                            correction = Matrix.Rotation(_pi * 0.5, 3, 'X')
+                            base_mat   = bb_cam.worldOrientation.to_3x3() @ correction
+
                         if bb_roll_enabled:
                             p.roll_angle += p.roll_speed * dt
                             roll_mat = Matrix.Rotation(p.roll_angle, 3, 'Y')
@@ -3275,8 +3903,11 @@ init()
         ensure_prop('ps_emission_mode', 'STRING', props.emission_mode)
         ensure_prop('ps_emission_shape', 'STRING', props.emission_shape)
         ensure_prop('ps_emission_sphere_radius', 'FLOAT', props.emission_sphere_radius)
+        ensure_prop('ps_emission_hemisphere_radius', 'FLOAT', props.emission_hemisphere_radius)
         ensure_prop('ps_emission_cone_radius',   'FLOAT', props.emission_cone_radius)
         ensure_prop('ps_emission_cone_height',   'FLOAT', props.emission_cone_height)
+        ensure_prop('ps_emission_cone_base_radius', 'FLOAT', props.emission_cone_base_radius)
+        ensure_prop('ps_emit_from',              'STRING', props.emit_from)
         ensure_prop('ps_emission_ring_radius',   'FLOAT', props.emission_ring_radius)
         ensure_prop('ps_emission_ring_width',    'FLOAT', props.emission_ring_width)
         ensure_prop('ps_max_particles', 'INT', props.max_particles)
@@ -3301,11 +3932,13 @@ init()
         ensure_prop('ps_gravity_power',  'FLOAT', props.gravity_power)
 
         # Simulation space
-        ensure_prop('ps_simulation_space', 'STRING', props.simulation_space)
+        ensure_prop('ps_simulation_space',    'STRING', props.simulation_space)
+        ensure_prop('ps_parent_with_emitter', 'BOOL',   props.parent_with_emitter)
 
         # Collision properties
-        ensure_prop('ps_enable_collision', 'BOOL', props.enable_collision)
-        ensure_prop('ps_bounce_strength', 'FLOAT', props.bounce_strength)
+        ensure_prop('ps_enable_collision',  'BOOL',  props.enable_collision)
+        ensure_prop('ps_bounce_strength',   'FLOAT', props.bounce_strength)
+        ensure_prop('ps_stop_on_collision', 'BOOL',  props.stop_on_collision)
 
         # Movement type
         ensure_prop('ps_movement_type', 'STRING', props.movement_type)
@@ -3330,6 +3963,7 @@ init()
         ensure_prop('ps_bb_roll_enabled', 'BOOL',  props.billboard_roll_enabled)
         ensure_prop('ps_bb_roll_speed',   'FLOAT', props.billboard_roll_speed)
         ensure_prop('ps_bb_roll_random',  'FLOAT', props.billboard_roll_random)
+        ensure_prop('ps_bb_facing',       'STRING', props.billboard_facing)
 
         # Rotation properties (XYZ)
         ensure_prop('ps_rotation_x', 'FLOAT', props.rotation[0])
@@ -3342,6 +3976,7 @@ init()
 
         # Color over lifetime
         ensure_prop('ps_enable_color',     'BOOL',  props.enable_color)
+        ensure_prop('ps_color_mode',       'STRING', props.color_mode)
         ensure_prop('ps_color_curve',      'STRING', '  ')
         ensure_prop('ps_size_curve',       'STRING', '  ')
         ensure_prop('ps_alpha_curve',      'STRING', '  ')
@@ -3356,6 +3991,8 @@ init()
 
         # Alpha over lifetime
         ensure_prop('ps_enable_alpha', 'BOOL',  props.enable_alpha)
+        ensure_prop('ps_alpha_mode',   'STRING', props.alpha_mode)
+        ensure_prop('ps_size_mode',    'STRING', props.size_mode)
         ensure_prop('ps_start_alpha',      'FLOAT', props.start_alpha)
         ensure_prop('ps_end_alpha',        'FLOAT', props.end_alpha)
         ensure_prop('ps_alpha_start_time', 'FLOAT', props.alpha_start_time)
@@ -3369,6 +4006,7 @@ init()
 
         # LOD
         ensure_prop('ps_enable_lod',      'BOOL',  props.enable_lod)
+        ensure_prop('ps_lod_levels',       'STRING', props.lod_levels)   # '1'/'2'/'3'
         ensure_prop('ps_lod_start',       'FLOAT', props.lod_start_distance)
         ensure_prop('ps_lod1_dist',       'FLOAT', props.lod1_distance)
         ensure_prop('ps_lod1_max',        'INT',   props.lod1_max_particles)
@@ -3412,6 +4050,17 @@ init()
         ensure_prop('ps_orbit_radius_random', 'FLOAT', props.orbit_radius_random)
         ensure_prop('ps_orbit_tilt',          'FLOAT', props.orbit_tilt)
 
+        # Sub-Emitter
+        ensure_prop('ps_sub_emitter_enabled',     'BOOL',   props.enable_sub_emitter)
+        ensure_prop('ps_sub_emitter',             'STRING', props.sub_emitter_object.name if props.sub_emitter_object else ' ')
+        ensure_prop('ps_sub_emitter_inherit_vel', 'BOOL',   props.sub_emitter_inherit_velocity)
+        ensure_prop('ps_sub_birth_enabled',       'BOOL',   props.enable_sub_emitter_birth)
+        ensure_prop('ps_sub_birth',               'STRING', props.sub_emitter_birth_object.name if props.sub_emitter_birth_object else ' ')
+        ensure_prop('ps_sub_birth_inherit_vel',   'BOOL',   props.sub_emitter_birth_inherit_velocity)
+        ensure_prop('ps_sub_coll_enabled',        'BOOL',   props.enable_sub_emitter_collision)
+        ensure_prop('ps_sub_coll',                'STRING', props.sub_emitter_collision_object.name if props.sub_emitter_collision_object else ' ')
+        ensure_prop('ps_sub_coll_inherit_vel',    'BOOL',   props.sub_emitter_collision_inherit_velocity)
+
         # create per-emitter template and store its name
         if props.particle_type == 'BILLBOARD':
             bb_name = self._ensure_billboard_template(context, init_obj)
@@ -3431,7 +4080,7 @@ init()
             new_props = [x for x in added if x.startswith("prop:")]
             summary = logic_parts[:]
             if new_props:
-                summary.append(f"{len(new_props)} game propertie(s)")
+                summary.append(f"{len(new_props)} game {'property' if len(new_props) == 1 else 'properties'}")
             self.report({'INFO'}, f"Initialized! Added: {', '.join(summary)}")
         return {'FINISHED'}
 
@@ -3680,6 +4329,41 @@ class PARTICLE_OT_remove_props(bpy.types.Operator):
         self.report({'INFO'}, f"Removed {len(indices)} game properties")
         return {'FINISHED'}
 
+
+_WIRE_PREFIXES = (
+    "PS_Wire_Box_",
+    "PS_Wire_Sphere_",
+    "PS_Wire_Hemisphere_",
+    "PS_Wire_Cone_",
+    "PS_Wire_Ring_",
+)
+
+def _cleanup_orphaned_wires(scene, depsgraph):
+    """Called after every depsgraph update.
+    Scans for PS wire objects whose parent emitter no longer exists and removes them.
+    Fast path: if no wire objects exist at all, returns immediately with one scan."""
+    to_remove = []
+    for obj in bpy.data.objects:
+        for prefix in _WIRE_PREFIXES:
+            if obj.name.startswith(prefix):
+                emitter_name = obj.name[len(prefix):]
+                if emitter_name not in bpy.data.objects:
+                    to_remove.append(obj)
+                break  # matched a prefix — no need to check the rest
+
+    for obj in to_remove:
+        mesh = obj.data if obj.type == 'MESH' else None
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass
+        if mesh and mesh.users == 0:
+            try:
+                bpy.data.meshes.remove(mesh)
+            except ReferenceError:
+                pass
+
+
 classes = (
     ParticleSystemProperties,
     PARTICLE_PT_upbge_panel,
@@ -3697,12 +4381,18 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Object.particle_system_props = bpy.props.PointerProperty(type=ParticleSystemProperties)
+    # Auto-delete wire visualizers when their emitter is deleted
+    if _cleanup_orphaned_wires not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_cleanup_orphaned_wires)
 
 def unregister():
+    # Remove the depsgraph handler first so it can't fire during cleanup
+    if _cleanup_orphaned_wires in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_cleanup_orphaned_wires)
+
     # Clean up all PS wire objects from all objects in all scenes
-    wire_prefixes = ("PS_Wire_Box_", "PS_Wire_Sphere_", "PS_Wire_Cone_", "PS_Wire_Ring_")
     for obj in list(bpy.data.objects):
-        if any(obj.name.startswith(prefix) for prefix in wire_prefixes):
+        if any(obj.name.startswith(prefix) for prefix in _WIRE_PREFIXES):
             mesh = obj.data if obj.type == 'MESH' else None
             bpy.data.objects.remove(obj, do_unlink=True)
             if mesh and mesh.users == 0:
