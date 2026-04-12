@@ -4,7 +4,7 @@ bl_info = {
     "version": (0, 8, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
-    "description": "Particle system for UPBGE (NO GPU)",
+    "description": "Addon creates a realtime particle system for UPBGE",
     "warning": "This beta version sill under development and is not stable at all times",
     "wiki_url": "",
     "category": "Physics",
@@ -266,7 +266,6 @@ _PROPS_MAP = (
     ('velocity_random',                    'ps_velocity_random'),
     ('simulation_space',                    'ps_simulation_space'),
     ('parent_with_emitter',                 'ps_parent_with_emitter'),
-    ('enable_follow_object',                'ps_follow_enabled'),
     ('movement_type',                    'ps_movement_type'),
     ('drag_enabled',                    'ps_drag_enabled'),
     ('drag_start',                    'ps_drag_start'),
@@ -349,33 +348,6 @@ _PROPS_MAP = (
     ('sub_emitter_collision_inherit_velocity', 'ps_sub_coll_inherit_vel'),
 )
 
-def update_base_color(self, context):
-    """Live-update the ShaderNodeRGB in the particle material when the color picker changes.
-    Works for both billboard (PS_BillboardMat_) and mesh (PS_Mat_) materials.
-    Only runs when Color over Lifetime is off — when COL is on the RGB node doesn't exist."""
-    obj = context.object
-    if not obj or self.enable_color:
-        return  # COL active: RGB node not present, nothing to update
-
-    ps = obj.particle_system_props
-
-    # Determine which material to update
-    if ps.particle_type == 'BILLBOARD':
-        mat_name = f"PS_BillboardMat_{obj.name}"
-    else:
-        mat_name = f"PS_Mat_{obj.name}"
-
-    mat = bpy.data.materials.get(mat_name)
-    if mat is None or not mat.use_nodes:
-        return  # material not built yet — Apply Material hasn't been run
-
-    # Find the RGB node — there is exactly one when COL is off
-    for node in mat.node_tree.nodes:
-        if node.type == 'RGB':
-            node.outputs[0].default_value = (*self.base_color, 1.0)
-            return  # found and updated, done
-
-
 def update_game_prop(self, context):
     obj = context.object
     if not obj: return
@@ -413,9 +385,6 @@ def update_game_prop(self, context):
 
     if 'ps_particle_mesh' in gp:
         gp['ps_particle_mesh'].value = self.particle_mesh.name if self.particle_mesh else 'ParticleSphere'
-
-    if 'ps_follow_object' in gp:
-        gp['ps_follow_object'].value = self.follow_object.name if self.follow_object else ' '
 
     if 'ps_sub_emitter' in gp:
         gp['ps_sub_emitter'].value = self.sub_emitter_object.name if self.sub_emitter_object else ' '
@@ -675,7 +644,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
 
     start_velocity: bpy.props.FloatVectorProperty(name="Start Velocity", default=(0.0, 0.0, 2.0), size=3, update=update_game_prop)
     velocity_random: bpy.props.FloatProperty(name="Random Velocity", default=0.5, min=0.0, max=10.0, update=update_game_prop)
-
     enable_gravity: bpy.props.BoolProperty(
         name="Enable Gravity",
         description="Enable gravity along the Z axis",
@@ -863,29 +831,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
-    # Follow Object — emitter copies target's world transform every frame at runtime.
-    # Cleaner than actual parenting: no local/world space hierarchy confusion,
-    # particles still simulate in world space as normal.
-    enable_follow_object: bpy.props.BoolProperty(
-        name="Follow Object",
-        description=(
-            "Copy the target object's world position and rotation to the emitter every frame. "
-            "Avoids parenting side-effects — particles still simulate in world space normally"
-        ),
-        default=False,
-        update=update_game_prop
-    )
-
-    def follow_object_poll(self, object):
-        return object != self.id_data  # prevent following itself
-
-    follow_object: bpy.props.PointerProperty(
-        name="Target Object",
-        type=bpy.types.Object,
-        description="Object whose world transform the emitter will copy every frame",
-        poll=follow_object_poll,
-    )
-
     # Particle Type
     particle_type: bpy.props.EnumProperty(
         name="Particle Type",
@@ -924,44 +869,18 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         description="Image to apply to the billboard material",
     )
 
-    blend_mode: bpy.props.EnumProperty(
-        name="Blend Mode",
+    texture_render: bpy.props.EnumProperty(
+        name="Texture Render",
         description=(
-            "How the particle blends with the scene.\n"
-            "Opaque: fully solid, no transparency — fastest.\n"
-            "Alpha Blend: correct sorted transparency — best quality, higher GPU cost.\n"
-            "Alpha Sort: like Alpha Blend but clips back-facing geometry to fix overdraw artifacts.\n"
-            "Additive: particle light adds on top of the scene — good for fire, sparks, magic glows"
+            "Quality of the particle material blending. "
+            "High (Blended): correct transparency sorting, higher GPU cost. "
+            "Low (Dithered): faster forward-render approximation, better performance"
         ),
         items=[
-            ('OPAQUE',      "Opaque",      "Fully solid — no transparency, fastest rendering"),
-            ('ALPHA_BLEND', "Alpha Blend", "Correct sorted transparency — best quality"),
-            ('ALPHA_SORT',  "Alpha Sort",  "Sorted transparency with back-face clipping — reduces overdraw"),
-            ('ADDITIVE',    "Additive",    "Adds particle light on top of the scene — fire, sparks, glows"),
+            ('HIGH', "High", "Blended — correct alpha transparency, higher GPU cost"),
+            ('LOW',  "Low",  "Dithered — faster approximation, better performance"),
         ],
-        default='ALPHA_BLEND',
-    )
-
-    material_type: bpy.props.EnumProperty(
-        name="Material Type",
-        description=(
-            "Shader used for particle materials"
-        ),
-        items=[
-            ('EMISSION', "Emission", "Unlit emission shader — ignores scene lighting, supports brightness above 1.0"),
-            ('BSDF',     "BSDF",     "Principled BSDF — lit by scene lights, casts and receives light normally"),
-        ],
-        default='EMISSION',
-    )
-
-    emission_strength: bpy.props.FloatProperty(
-        name="Strength",
-        description=(
-            "Emission shader strength multiplier. "
-        ),
-        default=1.0,
-        min=0.0,
-        max=1000.0
+        default='HIGH',
     )
 
     # Collision Properties
@@ -1553,11 +1472,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 row.template_ID(ps, "billboard_texture", open="image.open", unlink="image.unlink")
                 if not ps.billboard_texture:
                     box.label(text="No image selected — texture slot will be empty", icon='ERROR')
-            box.prop(ps, "blend_mode", text="Blend Mode")
-
-            # Flat color — shown when Color over Lifetime is off
-            if not ps.enable_color:
-                box.prop(ps, "base_color", text="Color")
+                box.prop(ps, "texture_render", text="Texture Render")
 
             # Color over Lifetime
             box.prop(ps, "enable_color", text="Color over Lifetime")
@@ -1617,16 +1532,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box = layout.box()
             box.label(text="Physics:", icon="DRIVER_TRANSFORM")
 
-            # Follow Object — emitter mirrors target's world transform every frame
-            box.prop(ps, "enable_follow_object", text="Follow Object", icon='LINKED')
-            if ps.enable_follow_object:
-                fo_row = box.row()
-                fo_row.prop(ps, "follow_object", text="")
-                if ps.follow_object is None:
-                    box.label(text="Assign the object to follow", icon='INFO')
-
-            box.separator()
-            box.prop(ps, "simulation_space", text="Space", icon="OBJECT_ORIGIN")
+            box.prop(ps, "simulation_space", text="Space", icon= "OBJECT_ORIGIN")
             if ps.simulation_space == 'LOCAL':
                 box.prop(ps, "parent_with_emitter", text="Parent with Emitter")
             box.prop(ps, "movement_type", text="Movement", icon= "EMPTY_ARROWS")
@@ -2507,7 +2413,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
             added.append("Controller")
         controller = existing_ctrl
 
-        script_text = """# UPBGE Particle System Runtime
+        script_text = """# UPBGE Particle System Runtime v0.9.0
 
 from bge import logic
 from mathutils import Vector, Matrix
@@ -2594,9 +2500,6 @@ class ParticleSystem:
         '_sub_emitter_enabled', '_sub_emitter_name', '_sub_emitter_inherit_vel',
         '_sub_birth_enabled',   '_sub_birth_name',   '_sub_birth_inherit_vel',
         '_sub_coll_enabled',    '_sub_coll_name',    '_sub_coll_inherit_vel',
-        # Follow Object
-        '_follow_enabled',      # True when the emitter should mirror a target object
-        '_follow_object_name',  # name of the target object to look up in scene.objects
     )
 
     def __init__(self, emitter_obj):
@@ -2667,9 +2570,6 @@ class ParticleSystem:
         self._sub_coll_enabled        = False
         self._sub_coll_name           = ''
         self._sub_coll_inherit_vel    = False
-        # Follow Object
-        self._follow_enabled     = False
-        self._follow_object_name = ''
         self.load_properties()
         self.create_particle_template()
         self.initialize_pool()
@@ -2816,8 +2716,6 @@ class ParticleSystem:
             g('ps_sub_coll_enabled',          False),      # 126
             g('ps_sub_coll',                  ' '),         # 127
             g('ps_sub_coll_inherit_vel',      False),      # 128
-            g('ps_follow_enabled',            False),      # 129 — follow object enabled
-            g('ps_follow_object',             ' '),        # 130 — name of object to follow
         )
 
     def _build_props_from_raw(self, r):
@@ -2945,8 +2843,6 @@ class ParticleSystem:
             'sub_coll_enabled':       r[126],
             'sub_coll':               r[127],
             'sub_coll_inherit_vel':   r[128],
-            'follow_enabled':         r[129],
-            'follow_object':          r[130],
         }
 
     def load_properties(self):
@@ -3163,10 +3059,6 @@ class ParticleSystem:
         self._sub_coll_enabled        = p.get('sub_coll_enabled',       False)
         self._sub_coll_name           = p.get('sub_coll',               ' ').strip()
         self._sub_coll_inherit_vel    = p.get('sub_coll_inherit_vel',   False)
-
-        # Follow Object — name stripped of sentinel space
-        self._follow_enabled     = p.get('follow_enabled', False)
-        self._follow_object_name = p.get('follow_object', ' ').strip()
 
     # ------------------------------------------------------------------
     # Turbulence noise
@@ -3541,19 +3433,6 @@ class ParticleSystem:
                 self._torque_rad = self._torque_per_sec * dt
 
         props = self.props
-
-        # ── Follow Object ──────────────────────────────────────────────
-        # Copy the target's world position and orientation to the emitter
-        # every frame BEFORE the velocity derivation so the delta is correct.
-        if self._follow_enabled and self._follow_object_name:
-            try:
-                _frame_scene_fo = logic.getCurrentScene()
-                _target = _frame_scene_fo.objects.get(self._follow_object_name)
-                if _target is not None:
-                    self.emitter.worldPosition    = _target.worldPosition
-                    self.emitter.worldOrientation = _target.worldOrientation
-            except Exception:
-                pass  # target removed mid-game — fail silently, keep last position
 
         # One scene/camera fetch per update() call, shared by launcher, LOD, and billboard.
         _frame_scene = logic.getCurrentScene()
@@ -3973,7 +3852,7 @@ class ParticleManager:
         self.systems = {}
         self.last_time = 0.0
         print("="*60)
-        print("PARTICLE SYSTEM - OBJECT POOLING")
+        print("PARTICLE SYSTEM v0.9.0 - OBJECT POOLING")
         print("="*60)
 
     def scan(self):
@@ -4073,10 +3952,6 @@ init()
         # Simulation space
         ensure_prop('ps_simulation_space',    'STRING', props.simulation_space)
         ensure_prop('ps_parent_with_emitter', 'BOOL',   props.parent_with_emitter)
-
-        # Follow Object
-        ensure_prop('ps_follow_enabled', 'BOOL',   props.enable_follow_object)
-        ensure_prop('ps_follow_object',  'STRING', props.follow_object.name if props.follow_object else ' ')
 
         # Collision properties
         ensure_prop('ps_enable_collision',  'BOOL',  props.enable_collision)
@@ -4239,137 +4114,112 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
     def _build_nodes(mat, ps):
         """Clear and rebuild the node tree based on ps settings."""
         mat.use_nodes = True
-        blend_mode = ps.blend_mode
-        use_emission = (ps.material_type == 'EMISSION')
-
-        # ── Blend mode → material settings ─────────────────────────────
-        if blend_mode == 'OPAQUE':
-            mat.blend_method          = 'OPAQUE'
-            mat.show_transparent_back = True
-        elif blend_mode == 'ALPHA_BLEND':
-            mat.blend_method          = 'BLEND'
-            mat.show_transparent_back = True
-        elif blend_mode == 'ALPHA_SORT':
-            mat.blend_method          = 'BLEND'
-            mat.show_transparent_back = False   # clips back faces to reduce overdraw
-        else:  # ADDITIVE
-            mat.blend_method          = 'BLEND'
-            mat.show_transparent_back = True
-
+        mat.blend_method = 'BLEND' if ps.texture_render == 'HIGH' else 'HASHED'
         nodes = mat.node_tree.nodes
         links = mat.node_tree.links
         nodes.clear()
 
-        use_tex   = ps.enable_texture
-        use_color = ps.enable_color
-        use_alpha = ps.enable_alpha
-        is_additive = (blend_mode == 'ADDITIVE')
-        is_opaque   = (blend_mode == 'OPAQUE')
+        use_tex      = ps.enable_texture
+        use_color    = ps.enable_color
+        use_alpha    = ps.enable_alpha
+        is_billboard = (ps.particle_type == 'BILLBOARD')
 
         # Output node
-        out = nodes.new('ShaderNodeOutputMaterial'); out.location = (750, 0)
+        out = nodes.new('ShaderNodeOutputMaterial'); out.location = (700, 0)
 
-        # ── Surface shader ──────────────────────────────────────────────
-        # Opaque / Alpha modes: same shader structure — Transparent mixed by
-        # alpha factor for EMISSION, or alpha socket for BSDF.
-        # Additive: Transparent+Mix but mix factor is hardwired to 0 (background
-        # is fully see-through) so the emission colour just adds on top of the scene.
-        if use_emission:
-            emission = nodes.new('ShaderNodeEmission');        emission.location = (350, 80)
-            emission.inputs['Strength'].default_value = ps.emission_strength
-            color_input = emission.inputs['Color']
+        if is_billboard:
+            # Billboards use Emission + Transparent mixed by alpha — fully unlit,
+            # same brightness from every angle regardless of light direction.
+            emission = nodes.new('ShaderNodeEmission');        emission.location = (300,  80)
+            transp   = nodes.new('ShaderNodeBsdfTransparent'); transp.location   = (300, -80)
+            mix_sh   = nodes.new('ShaderNodeMixShader');       mix_sh.location   = (500,   0)
+            links.new(transp.outputs['BSDF'],       mix_sh.inputs[1])
+            links.new(emission.outputs['Emission'], mix_sh.inputs[2])
+            links.new(mix_sh.outputs['Shader'],     out.inputs['Surface'])
 
-            if is_opaque:
-                # Straight emission to output — no transparency at all
-                links.new(emission.outputs['Emission'], out.inputs['Surface'])
-                alpha_input = None
-            else:
-                transp  = nodes.new('ShaderNodeBsdfTransparent'); transp.location  = (350, -80)
-                mix_sh  = nodes.new('ShaderNodeMixShader');       mix_sh.location  = (550,   0)
-                links.new(transp.outputs['BSDF'],       mix_sh.inputs[1])
-                links.new(emission.outputs['Emission'], mix_sh.inputs[2])
-                links.new(mix_sh.outputs['Shader'],     out.inputs['Surface'])
+            obj_inf = None
+            if use_color or use_alpha or use_tex:
+                obj_inf = nodes.new('ShaderNodeObjectInfo'); obj_inf.location = (-300, -150)
 
-                if is_additive:
-                    # Mix factor = 1 → always fully show emission, never transparent
-                    # The BLEND blend_method makes it additive in the compositor
-                    val = nodes.new('ShaderNodeValue'); val.location = (150, -160)
-                    val.outputs[0].default_value = 1.0
-                    links.new(val.outputs['Value'], mix_sh.inputs[0])
-                    alpha_input = None  # additive ignores per-particle alpha
+            if use_tex:
+                tex_co  = nodes.new('ShaderNodeTexCoord'); tex_co.location  = (-600, 150)
+                img_tex = nodes.new('ShaderNodeTexImage'); img_tex.location = (-300, 150)
+                links.new(tex_co.outputs['UV'], img_tex.inputs['Vector'])
+                if ps.billboard_texture:
+                    img_tex.image = ps.billboard_texture
+
+                if use_color:
+                    # ShaderNodeMix replaces ShaderNodeMixRGB in Blender 5
+                    mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
+                    mix_col.data_type  = 'RGBA'
+                    mix_col.blend_type = 'MULTIPLY'
+                    mix_col.inputs['Factor'].default_value = 1.0
+                    links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
+                    links.new(obj_inf.outputs['Color'], mix_col.inputs['B'])
+                    links.new(mix_col.outputs['Result'], emission.inputs['Color'])
                 else:
-                    alpha_input = mix_sh.inputs[0]  # 0=transparent, 1=emission
-        else:  # BSDF
-            bsdf = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location = (350, 0)
-            links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
-            color_input = bsdf.inputs['Base Color']
-            alpha_input = None if is_opaque else bsdf.inputs['Alpha']
+                    links.new(img_tex.outputs['Color'], emission.inputs['Color'])
 
-        # ── ObjectInfo for color/alpha over lifetime ────────────────────
-        # obj.color (set by the runtime) drives color and alpha via ObjectInfo.
-        # When COL is off, a plain RGB node carrying base_color is used instead.
-        obj_inf = None
-        rgb_node = None
-        if use_color or use_alpha or use_tex:
-            obj_inf = nodes.new('ShaderNodeObjectInfo')
-            obj_inf.location = (-350, -150)
-        if not use_color:
-            rgb_node = nodes.new('ShaderNodeRGB')
-            rgb_node.location = (-350, 200)
-            rgb_node.outputs[0].default_value = (*ps.base_color, 1.0)
-
-        # ── Texture + color/alpha wiring ────────────────────────────────
-        if use_tex:
-            tex_co  = nodes.new('ShaderNodeTexCoord'); tex_co.location  = (-650, 150)
-            img_tex = nodes.new('ShaderNodeTexImage'); img_tex.location = (-350, 150)
-            links.new(tex_co.outputs['UV'], img_tex.inputs['Vector'])
-            if ps.billboard_texture:
-                img_tex.image = ps.billboard_texture
-
-            if use_color:
-                mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
-                mix_col.data_type  = 'RGBA'
-                mix_col.blend_type = 'MULTIPLY'
-                mix_col.inputs['Factor'].default_value = 1.0
-                links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
-                links.new(obj_inf.outputs['Color'], mix_col.inputs['B'])
-                links.new(mix_col.outputs['Result'], color_input)
-            else:
-                mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
-                mix_col.data_type  = 'RGBA'
-                mix_col.blend_type = 'MULTIPLY'
-                mix_col.inputs['Factor'].default_value = 1.0
-                links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
-                links.new(rgb_node.outputs['Color'], mix_col.inputs['B'])
-                links.new(mix_col.outputs['Result'], color_input)
-
-            # Alpha wiring — skip entirely for Opaque and Additive
-            if alpha_input is not None:
                 if use_alpha:
                     math_a = nodes.new('ShaderNodeMath'); math_a.location = (50, -50)
                     math_a.operation = 'MULTIPLY'
                     links.new(img_tex.outputs['Alpha'], math_a.inputs[0])
                     links.new(obj_inf.outputs['Alpha'], math_a.inputs[1])
-                    links.new(math_a.outputs['Value'],  alpha_input)
+                    links.new(math_a.outputs['Value'],  mix_sh.inputs[0])
                 else:
-                    links.new(img_tex.outputs['Alpha'], alpha_input)
+                    links.new(img_tex.outputs['Alpha'], mix_sh.inputs[0])
+
+            else:
+                if use_color:
+                    links.new(obj_inf.outputs['Color'], emission.inputs['Color'])
+                if use_alpha:
+                    links.new(obj_inf.outputs['Alpha'], mix_sh.inputs[0])
+                else:
+                    val = nodes.new('ShaderNodeValue'); val.location = (300, -180)
+                    val.outputs[0].default_value = 1.0
+                    links.new(val.outputs['Value'], mix_sh.inputs[0])
 
         else:
-            # No texture
-            if use_color:
-                links.new(obj_inf.outputs['Color'], color_input)
-            else:
-                links.new(rgb_node.outputs['Color'], color_input)
+            # Mesh particles — Principled BSDF so scene lighting applies normally
+            bsdf = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location = (300, 0)
+            links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
 
-            # Alpha wiring — skip entirely for Opaque and Additive
-            if alpha_input is not None:
+            obj_inf = None
+            if use_color or use_alpha or use_tex:
+                obj_inf = nodes.new('ShaderNodeObjectInfo'); obj_inf.location = (-250, -150)
+
+            if use_tex:
+                tex_co  = nodes.new('ShaderNodeTexCoord'); tex_co.location  = (-500, 150)
+                img_tex = nodes.new('ShaderNodeTexImage'); img_tex.location = (-250, 150)
+                links.new(tex_co.outputs['UV'], img_tex.inputs['Vector'])
+                if ps.billboard_texture:
+                    img_tex.image = ps.billboard_texture
+
+                if use_color:
+                    mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
+                    mix_col.data_type  = 'RGBA'
+                    mix_col.blend_type = 'MULTIPLY'
+                    mix_col.inputs['Factor'].default_value = 1.0
+                    links.new(img_tex.outputs['Color'],  mix_col.inputs['A'])
+                    links.new(obj_inf.outputs['Color'],  mix_col.inputs['B'])
+                    links.new(mix_col.outputs['Result'], bsdf.inputs['Base Color'])
+                else:
+                    links.new(img_tex.outputs['Color'], bsdf.inputs['Base Color'])
+
                 if use_alpha:
-                    links.new(obj_inf.outputs['Alpha'], alpha_input)
-                elif use_emission:
-                    # No alpha, no texture, emission: fully opaque mix factor
-                    val = nodes.new('ShaderNodeValue'); val.location = (350, -180)
-                    val.outputs[0].default_value = 1.0
-                    links.new(val.outputs['Value'], alpha_input)
+                    math_a = nodes.new('ShaderNodeMath'); math_a.location = (50, -50)
+                    math_a.operation = 'MULTIPLY'
+                    links.new(img_tex.outputs['Alpha'],  math_a.inputs[0])
+                    links.new(obj_inf.outputs['Alpha'],  math_a.inputs[1])
+                    links.new(math_a.outputs['Value'],   bsdf.inputs['Alpha'])
+                else:
+                    links.new(img_tex.outputs['Alpha'], bsdf.inputs['Alpha'])
+
+            else:
+                if use_color:
+                    links.new(obj_inf.outputs['Color'], bsdf.inputs['Base Color'])
+                if use_alpha:
+                    links.new(obj_inf.outputs['Alpha'], bsdf.inputs['Alpha'])
 
     def execute(self, context):
         obj = context.active_object
