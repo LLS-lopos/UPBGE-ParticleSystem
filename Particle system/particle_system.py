@@ -4,10 +4,10 @@ bl_info = {
     "version": (0, 8, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
-    "description": "Addon creates a realtime particle system for UPBGE",
+    "description": "Addon creates a particle system for game engine  ",
     "warning": "This beta version sill under development and is not stable at all times",
     "wiki_url": "",
-    "category": "Physics",
+    "category": "Game Engine",
 }
 
 import bpy
@@ -71,7 +71,7 @@ def update_wire_shape(self, context):
             w.hide_viewport = True
             w.hide_render   = True
 
-    # Show/hide based on current shape — parent/location set permanently at creation
+    # Show/hide based on current shape - parent/location set permanently at creation
     if ps.emission_shape == 'BOX':
         _hide_all()
         wire_box.scale         = ps.emission_box_size
@@ -543,7 +543,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     trigger_enabled: bpy.props.BoolProperty(
         name="Trigger",
         description=" Activate and Control emission via Logic Bricks",
-        default=False,
+        default=True,
         update=update_game_prop
     )
 
@@ -802,17 +802,12 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     billboard_facing: bpy.props.EnumProperty(
         name="Rotation Method",
         description=(
-            "How each billboard orients itself toward the camera.\n"
-            "Camera Rotation: copies the camera's own orientation matrix — all particles "
-            "share one matrix, cheapest, best for flat effects (rain, sparks).\n"
-            "Look-At: each particle independently builds a 3D rotation that points its "
-            "normal directly at the camera — slightly more expensive but gives correct "
-            "depth layering for volumetric effects like fire and smoke"
+        "How the particles are rotated to the screen"
         ),
         items=[
-            ('CAM_ROT', "Camera Rotation",
-             "Copy camera orientation — all particles share one matrix per frame (default)"),
-            ('LOOK_AT', "Look-At",
+            ('CAM_ROT', "Camera Rotation Matrix",
+             "Copy camera orientation, all particles share one matrix per frame"),
+            ('LOOK_AT', "3D Space",
              "Each particle faces the camera in true 3D — better for fire and volumetric effects"),
         ],
         default='CAM_ROT',
@@ -930,13 +925,11 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             "How the particle blends with the scene.\n"
             "Opaque: fully solid, no transparency — fastest.\n"
             "Alpha Blend: correct sorted transparency — best quality, higher GPU cost.\n"
-            "Alpha Sort: like Alpha Blend but clips back-facing geometry to fix overdraw artifacts.\n"
             "Additive: particle light adds on top of the scene — good for fire, sparks, magic glows"
         ),
         items=[
             ('OPAQUE',      "Opaque",      "Fully solid — no transparency, fastest rendering"),
             ('ALPHA_BLEND', "Alpha Blend", "Correct sorted transparency — best quality"),
-            ('ALPHA_SORT',  "Alpha Sort",  "Sorted transparency with back-face clipping — reduces overdraw"),
             ('ADDITIVE',    "Additive",    "Adds particle light on top of the scene — fire, sparks, glows"),
         ],
         default='ALPHA_BLEND',
@@ -1453,7 +1446,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         layout.separator()
         layout.prop(ps, "enabled", text="Particle Emitter")
         #Trigger
-        layout.prop(ps, "trigger_enabled", text="Emission Trigger")
+        layout.prop(ps, "trigger_enabled", text="Play on awake")
         if ps.enabled:
             box = layout.box()
             box.label(text="Emission:", icon="PARTICLE_DATA")
@@ -4238,20 +4231,19 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
     @staticmethod
     def _build_nodes(mat, ps):
         """Clear and rebuild the node tree based on ps settings."""
-        mat.use_nodes = True
-        blend_mode = ps.blend_mode
+        mat.use_nodes            = True
+        mat.use_backface_culling = False
+
+        blend_mode   = ps.blend_mode
         use_emission = (ps.material_type == 'EMISSION')
 
-        # ── Blend mode → material settings ─────────────────────────────
+        # ── Blend mode → material blend flags ──────────────────────────
         if blend_mode == 'OPAQUE':
             mat.blend_method          = 'OPAQUE'
             mat.show_transparent_back = True
         elif blend_mode == 'ALPHA_BLEND':
             mat.blend_method          = 'BLEND'
             mat.show_transparent_back = True
-        elif blend_mode == 'ALPHA_SORT':
-            mat.blend_method          = 'BLEND'
-            mat.show_transparent_back = False   # clips back faces to reduce overdraw
         else:  # ADDITIVE
             mat.blend_method          = 'BLEND'
             mat.show_transparent_back = True
@@ -4260,9 +4252,9 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
         links = mat.node_tree.links
         nodes.clear()
 
-        use_tex   = ps.enable_texture
-        use_color = ps.enable_color
-        use_alpha = ps.enable_alpha
+        use_tex     = ps.enable_texture
+        use_color   = ps.enable_color
+        use_alpha   = ps.enable_alpha
         is_additive = (blend_mode == 'ADDITIVE')
         is_opaque   = (blend_mode == 'OPAQUE')
 
@@ -4270,36 +4262,26 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
         out = nodes.new('ShaderNodeOutputMaterial'); out.location = (750, 0)
 
         # ── Surface shader ──────────────────────────────────────────────
-        # Opaque / Alpha modes: same shader structure — Transparent mixed by
-        # alpha factor for EMISSION, or alpha socket for BSDF.
-        # Additive: Transparent+Mix but mix factor is hardwired to 0 (background
-        # is fully see-through) so the emission colour just adds on top of the scene.
         if use_emission:
-            emission = nodes.new('ShaderNodeEmission');        emission.location = (350, 80)
+            emission = nodes.new('ShaderNodeEmission'); emission.location = (350, 80)
             emission.inputs['Strength'].default_value = ps.emission_strength
             color_input = emission.inputs['Color']
 
             if is_opaque:
-                # Straight emission to output — no transparency at all
                 links.new(emission.outputs['Emission'], out.inputs['Surface'])
                 alpha_input = None
             else:
+                # Both Alpha Blend and Additive use Transparent+Mix.
+                # Additive: BLEND mode on the material does the GPU additive pass;
+                # the mix factor (alpha_input) controls per-particle fade.
                 transp  = nodes.new('ShaderNodeBsdfTransparent'); transp.location  = (350, -80)
                 mix_sh  = nodes.new('ShaderNodeMixShader');       mix_sh.location  = (550,   0)
                 links.new(transp.outputs['BSDF'],       mix_sh.inputs[1])
                 links.new(emission.outputs['Emission'], mix_sh.inputs[2])
                 links.new(mix_sh.outputs['Shader'],     out.inputs['Surface'])
+                alpha_input = mix_sh.inputs[0]
 
-                if is_additive:
-                    # Mix factor = 1 → always fully show emission, never transparent
-                    # The BLEND blend_method makes it additive in the compositor
-                    val = nodes.new('ShaderNodeValue'); val.location = (150, -160)
-                    val.outputs[0].default_value = 1.0
-                    links.new(val.outputs['Value'], mix_sh.inputs[0])
-                    alpha_input = None  # additive ignores per-particle alpha
-                else:
-                    alpha_input = mix_sh.inputs[0]  # 0=transparent, 1=emission
-        else:  # BSDF
+        else:  # BSDF — available for all blend modes including Additive
             bsdf = nodes.new('ShaderNodeBsdfPrincipled'); bsdf.location = (350, 0)
             links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
             color_input = bsdf.inputs['Base Color']
@@ -4326,33 +4308,50 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
             if ps.billboard_texture:
                 img_tex.image = ps.billboard_texture
 
-            if use_color:
-                mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
-                mix_col.data_type  = 'RGBA'
-                mix_col.blend_type = 'MULTIPLY'
-                mix_col.inputs['Factor'].default_value = 1.0
-                links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
-                links.new(obj_inf.outputs['Color'], mix_col.inputs['B'])
-                links.new(mix_col.outputs['Result'], color_input)
-            else:
-                mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
-                mix_col.data_type  = 'RGBA'
-                mix_col.blend_type = 'MULTIPLY'
-                mix_col.inputs['Factor'].default_value = 1.0
-                links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
-                links.new(rgb_node.outputs['Color'], mix_col.inputs['B'])
-                links.new(mix_col.outputs['Result'], color_input)
+            if is_additive:
+                # Additive + texture: use tex.Alpha to drive emission brightness.
+                # When COL is on, use obj_inf.Color (runtime color-over-lifetime).
+                # When COL is off, use the flat base_color RGB node.
+                color_source = obj_inf.outputs['Color'] if use_color else rgb_node.outputs['Color']
+                alpha_color = nodes.new('ShaderNodeMix'); alpha_color.location = (50, 150)
+                alpha_color.data_type = 'RGBA'
+                alpha_color.clamp_factor = True
+                alpha_color.inputs['A'].default_value = (0.0, 0.0, 0.0, 1.0)
+                links.new(color_source,              alpha_color.inputs['B'])
+                links.new(img_tex.outputs['Alpha'],  alpha_color.inputs['Factor'])
+                links.new(alpha_color.outputs['Result'], color_input)
 
-            # Alpha wiring — skip entirely for Opaque and Additive
-            if alpha_input is not None:
-                if use_alpha:
+                # Mix factor: tex_alpha × obj_alpha if Alpha OL is on, else just tex_alpha
+                if use_alpha and alpha_input is not None:
                     math_a = nodes.new('ShaderNodeMath'); math_a.location = (50, -50)
                     math_a.operation = 'MULTIPLY'
                     links.new(img_tex.outputs['Alpha'], math_a.inputs[0])
                     links.new(obj_inf.outputs['Alpha'], math_a.inputs[1])
                     links.new(math_a.outputs['Value'],  alpha_input)
-                else:
+                elif alpha_input is not None:
                     links.new(img_tex.outputs['Alpha'], alpha_input)
+
+            else:
+                # Non-additive: multiply texture color by base_color / obj.color
+                color_source = obj_inf.outputs['Color'] if use_color else rgb_node.outputs['Color']
+                mix_col = nodes.new('ShaderNodeMix'); mix_col.location = (50, 150)
+                mix_col.data_type  = 'RGBA'
+                mix_col.blend_type = 'MULTIPLY'
+                mix_col.inputs['Factor'].default_value = 1.0
+                links.new(img_tex.outputs['Color'], mix_col.inputs['A'])
+                links.new(color_source,             mix_col.inputs['B'])
+                links.new(mix_col.outputs['Result'], color_input)
+
+                # Alpha wiring
+                if alpha_input is not None:
+                    if use_alpha:
+                        math_a = nodes.new('ShaderNodeMath'); math_a.location = (50, -50)
+                        math_a.operation = 'MULTIPLY'
+                        links.new(img_tex.outputs['Alpha'], math_a.inputs[0])
+                        links.new(obj_inf.outputs['Alpha'], math_a.inputs[1])
+                        links.new(math_a.outputs['Value'],  alpha_input)
+                    else:
+                        links.new(img_tex.outputs['Alpha'], alpha_input)
 
         else:
             # No texture
@@ -4361,12 +4360,14 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
             else:
                 links.new(rgb_node.outputs['Color'], color_input)
 
-            # Alpha wiring — skip entirely for Opaque and Additive
+            # Alpha wiring — skip only for Opaque (alpha_input is None)
             if alpha_input is not None:
                 if use_alpha:
                     links.new(obj_inf.outputs['Alpha'], alpha_input)
                 elif use_emission:
-                    # No alpha, no texture, emission: fully opaque mix factor
+                    # No alpha-over-lifetime: wire 1.0 so emission is fully visible.
+                    # For additive this means full-brightness emission; for alpha blend
+                    # this means fully opaque (user can enable Alpha OL to get fade).
                     val = nodes.new('ShaderNodeValue'); val.location = (350, -180)
                     val.outputs[0].default_value = 1.0
                     links.new(val.outputs['Value'], alpha_input)
