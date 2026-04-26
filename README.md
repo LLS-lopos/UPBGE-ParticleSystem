@@ -24,7 +24,7 @@ It's an addon design for UPBGE 0.5+ to create particle effects for your game wit
 4. Choose a particle type *Billboard* or *Mesh*
 5. Hide the object by selecting it and pressing H or clicking on the eye in the outliner
 6. Click on "Initialize"
-7. Check the "Emission trigger" checkbox 
+7. Check the "Play On Awake" checkbox 
 8. Press P and enjoy!
 
 > [!TIP]
@@ -44,9 +44,17 @@ The performance can be an issue since the Add-on uses CPU in complex effects, bu
 Coming soon
 
 ## Discord Server
-If you want to join the community, go to the Discord server https://discord.gg/842uWxchu7
+Join the community in the Discord server https://discord.gg/842uWxchu7
 
 ## Report bugs
-If you face any bug please report it on GitHub
+If you face any bugs, please report them on GitHub
+
+## Contributing
+Contributors are very welcome. If you decide to contribute, please follow these rules:
+1. Fixing bugs, adding new features or anything that touches the code, given in the form of Pull Requests
+2. You are allowed to use AI for coding, suggest a new feature or anything else, just make sure you understand the concept and how it works in UPBGE in general
+3. Reviewing Pull Requests takes at least 3 days or more, based on how big the changes are
+4. Any implementations must come with reasons and how important they are for the particle system
+5. Anything unrelated to the particle system will not be accepted
 
 Enjoy!
