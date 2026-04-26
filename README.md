@@ -43,18 +43,18 @@ The performance can be an issue since the Add-on uses CPU in complex effects, bu
 ## Documentation 
 Coming soon
 
+## Contributing
+Contributors are very welcome. If you decide to contribute, please follow these rules:
+1. Fixing bugs, adding new features or anything that touches the code, given in the form of Pull Requests
+2. You are allowed to use AI for coding, suggest a new feature or anything else, make sure you understand the concept and how it works in UPBGE in general
+3. Reviewing Pull Requests takes at least 3 days or more, based on how big the changes are
+4. Any implementations must come with reasons and how important they are for the particle system
+5. Anything unrelated to the particle system will not be accepted
+
 ## Discord Server
 Join the community in the Discord server https://discord.gg/842uWxchu7
 
 ## Report bugs
-If you face any bugs, please report them on GitHub
-
-## Contributing
-Contributors are very welcome. If you decide to contribute, please follow these rules:
-1. Fixing bugs, adding new features or anything that touches the code, given in the form of Pull Requests
-2. You are allowed to use AI for coding, suggest a new feature or anything else, just make sure you understand the concept and how it works in UPBGE in general
-3. Reviewing Pull Requests takes at least 3 days or more, based on how big the changes are
-4. Any implementations must come with reasons and how important they are for the particle system
-5. Anything unrelated to the particle system will not be accepted
+If you face any bugs, please report them in issues 
 
 Enjoy!
