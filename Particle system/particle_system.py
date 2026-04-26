@@ -4,7 +4,7 @@ bl_info = {
     "version": (0, 8, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
-    "description": "Addon creates a particle system for game engine  ",
+    "description": "Addon creates a particle system for game engine",
     "warning": "This beta version sill under development and is not stable at all times",
     "wiki_url": "",
     "category": "Game Engine",
@@ -71,7 +71,7 @@ def update_wire_shape(self, context):
             w.hide_viewport = True
             w.hide_render   = True
 
-    # Show/hide based on current shape - parent/location set permanently at creation
+    # Show/hide based on current shape — parent/location set permanently at creation
     if ps.emission_shape == 'BOX':
         _hide_all()
         wire_box.scale         = ps.emission_box_size
@@ -256,6 +256,7 @@ _PROPS_MAP = (
     ('emission_ring_width',                    'ps_emission_ring_width'),
     ('max_particles',                    'ps_max_particles'),
     ('emission_rate',                    'ps_emission_rate'),
+    ('emission_rate_distance',           'ps_emission_rate_dist'),
     ('emission_delay',                    'ps_emission_delay'),
     ('burst_count',                    'ps_burst_count'),
     ('is_one_shot',                    'ps_is_one_shot'),
@@ -263,6 +264,7 @@ _PROPS_MAP = (
     ('lifetime_random',                    'ps_lifetime_random'),
     ('start_size',                    'ps_start_size'),
     ('end_size',                    'ps_end_size'),
+    ('max_size',                      'ps_max_size'),
     ('velocity_random',                    'ps_velocity_random'),
     ('simulation_space',                    'ps_simulation_space'),
     ('parent_with_emitter',                 'ps_parent_with_emitter'),
@@ -276,6 +278,10 @@ _PROPS_MAP = (
     ('billboard_roll_speed',                      'ps_bb_roll_speed'),
     ('billboard_roll_random',                     'ps_bb_roll_random'),
     ('billboard_facing',                          'ps_bb_facing'),
+    ('enable_trail',                              'ps_trail_enabled'),
+    ('trail_segments',                            'ps_trail_segments'),
+    ('trail_alpha',                               'ps_trail_alpha'),
+    ('trail_width',                               'ps_trail_width'),
     ('enable_gravity',                    'ps_enable_gravity'),
     ('gravity_power',                    'ps_gravity_power'),
     ('enable_collision',                    'ps_enable_collision'),
@@ -294,6 +300,7 @@ _PROPS_MAP = (
     ('turbulence_strength',                    'ps_turb_strength'),
     ('turbulence_frequency',                    'ps_turb_frequency'),
     ('turbulence_speed',                    'ps_turb_speed'),
+    ('turbulence_seed',                       'ps_turb_seed'),
     ('enable_lod',                    'ps_enable_lod'),
     ('lod_start_distance',                    'ps_lod_start'),
     ('lod1_distance',                    'ps_lod1_dist'),
@@ -436,6 +443,11 @@ def update_game_prop(self, context):
         gp['ps_color_end_g'].value = self.color_end[1]
         gp['ps_color_end_b'].value = self.color_end[2]
 
+    if 'ps_trail_color_r' in gp:
+        gp['ps_trail_color_r'].value = self.trail_color[0]
+        gp['ps_trail_color_g'].value = self.trail_color[1]
+        gp['ps_trail_color_b'].value = self.trail_color[2]
+
 # ── Color Curve Helper ──────────────────────────────────────────────────────
 # Curve node lives inside a hidden material — the only safe home for
 # ShaderNodeRGBCurve in Blender 5 (node groups crash at the C level).
@@ -502,6 +514,28 @@ def sample_color_curve(obj_name, n=16): return _sample_curve_node(get_color_curv
 def sample_alpha_curve(obj_name, n=64): return _sample_curve_node(get_alpha_curve_node(obj_name), n)
 def sample_size_curve(obj_name, n=16):  return _sample_curve_node(get_size_curve_node(obj_name), n)
 
+# ── Color Ramp ────────────────────────────────────────────────────────────────
+def get_color_ramp_node(obj_name):
+    mat = bpy.data.materials.get(CURVE_MAT_PREFIX + obj_name)
+    if mat is None or not mat.use_nodes:
+        return None
+    for node in mat.node_tree.nodes:
+        if node.bl_idname == 'ShaderNodeValToRGB' and node.label == 'ColorRamp':
+            return node
+    return None
+
+def sample_color_ramp(obj_name):
+    """Bake all ramp stops into 'pos,R,G,B,A;pos,R,G,B,A;...'
+    Returns None if the ramp node does not exist yet."""
+    node = get_color_ramp_node(obj_name)
+    if node is None:
+        return None
+    stops = []
+    for el in node.color_ramp.elements:
+        c = el.color
+        stops.append(f'{el.position:.4f},{c[0]:.4f},{c[1]:.4f},{c[2]:.4f},{c[3]:.4f}')
+    return ';'.join(stops) if stops else None
+
 # ── Init operators ───────────────────────────────────────────────────────────
 def _make_init_operator(bl_idname, bl_label, label_key):
     """Factory — returns an init operator class for the given curve label."""
@@ -531,6 +565,32 @@ PARTICLE_OT_init_alpha_curve = _make_init_operator(
 PARTICLE_OT_init_size_curve  = _make_init_operator(
     "particle.init_size_curve",  "Initialize Size Curve",  "SizeCurve")
 
+class PARTICLE_OT_init_color_ramp(bpy.types.Operator):
+    """Create the Color Ramp node used in RAMP mode."""
+    bl_idname  = "particle.init_color_ramp"
+    bl_label   = "Initialize Color Ramp"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object")
+            return {'CANCELLED'}
+        if get_color_ramp_node(obj.name) is not None:
+            self.report({'INFO'}, "Color Ramp already exists")
+            return {'FINISHED'}
+        mat  = _ensure_curve_mat(obj)
+        node = mat.node_tree.nodes.new('ShaderNodeValToRGB')
+        node.label = 'ColorRamp'
+        # Default: white at 0, transparent black at 1
+        ramp = node.color_ramp
+        ramp.elements[0].position = 0.0
+        ramp.elements[0].color    = (1.0, 1.0, 1.0, 1.0)
+        ramp.elements[1].position = 1.0
+        ramp.elements[1].color    = (0.0, 0.0, 0.0, 0.0)
+        self.report({'INFO'}, "Color Ramp initialized")
+        return {'FINISHED'}
+
 # Particle System Properties
 class ParticleSystemProperties(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(
@@ -543,13 +603,18 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     trigger_enabled: bpy.props.BoolProperty(
         name="Trigger",
         description=" Activate and Control emission via Logic Bricks",
-        default=True,
+        default=False,
         update=update_game_prop
     )
 
     emission_mode: bpy.props.EnumProperty(
         name="Emission Mode",
-        items=[('CONTINUOUS', "Continuous", ""), ('BURST', "Burst", "")],
+        items=[
+            ('CONTINUOUS', "Continuous",         "Emit at a steady rate over time"),
+            ('BURST',      "Burst",              "Emit a fixed number of particles at once"),
+            ('DISTANCE',   "Rate over Distance", "Emit particles based on how far the emitter moves — "
+                                                 "useful for tyre tracks, footsteps, motion trails"),
+        ],
         default='CONTINUOUS',
         update=update_game_prop
     )
@@ -652,6 +717,16 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     max_particles: bpy.props.IntProperty(name="Max Particles", default=100, min=1, max=5000, update=update_game_prop)
     emission_rate: bpy.props.FloatProperty(name="Emission Rate", default=10.0, min=0.0, max=1000, update=update_game_prop)
 
+    emission_rate_distance: bpy.props.FloatProperty(
+        name="Rate over Distance",
+        description="Number of particles to emit per unit of world-space distance the emitter travels. "
+                    "Only active when Emission Mode is set to Rate over Distance",
+        default=5.0,
+        min=0.01,
+        max=500.0,
+        update=update_game_prop
+    )
+
     # NEW: Delay for Burst Mode
     emission_delay: bpy.props.FloatProperty(name="Burst Delay", description="Time between bursts (seconds)", default=1.0, min=0.1, max=100.0, update=update_game_prop)
 
@@ -662,6 +737,14 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     lifetime_random: bpy.props.FloatProperty(name="Random Lifetime", default=0.5, min=0.0, max=1.0, update=update_game_prop)
     start_size: bpy.props.FloatProperty(name="Start Size", default=0.1, min=0.001, max=50.0, update=update_game_prop)
     end_size: bpy.props.FloatProperty(name="End Size", default=0.05, min=0.001, max=50.0, update=update_game_prop)
+    max_size: bpy.props.FloatProperty(
+        name="Max Size",
+        description="Maximum size the curve can reach (curve output 0.0–1.0 is multiplied by this value)",
+        default=0.1,
+        min=0.001,
+        max=50.0,
+        update=update_game_prop
+    )
 
     size_mode: bpy.props.EnumProperty(
         name="Size Mode",
@@ -674,7 +757,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     )
 
     start_velocity: bpy.props.FloatVectorProperty(name="Start Velocity", default=(0.0, 0.0, 2.0), size=3, update=update_game_prop)
-    velocity_random: bpy.props.FloatProperty(name="Random Velocity", default=0.5, min=0.0, max=10.0, update=update_game_prop)
+    velocity_random: bpy.props.FloatProperty(name="Random Velocity", default=0.5, min=0.0, update=update_game_prop)
 
     enable_gravity: bpy.props.BoolProperty(
         name="Enable Gravity",
@@ -811,6 +894,41 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
              "Each particle faces the camera in true 3D — better for fire and volumetric effects"),
         ],
         default='CAM_ROT',
+        update=update_game_prop
+    )
+
+    # Trail settings
+    enable_trail: bpy.props.BoolProperty(
+        name="Enable Trail",
+        description="Draw a fading line-strip trail behind each particle using bge.render.drawLine — "
+                    "zero depsgraph cost, no mesh objects created",
+        default=False,
+        update=update_game_prop
+    )
+    trail_segments: bpy.props.IntProperty(
+        name="Segments",
+        description="Number of position samples stored per particle — more segments = longer smoother trail",
+        default=12, min=2, max=256,
+        update=update_game_prop
+    )
+    trail_color: bpy.props.FloatVectorProperty(
+        name="Color",
+        description="Base color of the trail at the head (where it meets the particle)",
+        subtype='COLOR', size=3,
+        default=(1.0, 1.0, 1.0),
+        min=0.0, max=1.0,
+        update=update_game_prop
+    )
+    trail_alpha: bpy.props.FloatProperty(
+        name="Alpha",
+        description="Brightness of the trail at its head — fades to 0 toward the tail automatically",
+        default=0.8, min=0.0, max=1.0,
+        update=update_game_prop
+    )
+    trail_width: bpy.props.IntProperty(
+        name="Width",
+        description="Line width in pixels — values above 1 stack multiple offset lines to fake thickness",
+        default=1, min=1,
         update=update_game_prop
     )
 
@@ -970,7 +1088,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         description="How much particles bounce",
         default=0.5,
         min=0.0,
-        max=1.0,
         update=update_game_prop
     )
 
@@ -1055,6 +1172,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         items=[
             ('SIMPLE', "Simple", "Linear blend between Start and End, controlled by From/To"),
             ('CURVE',  "Curve",  "Blend shaped by a custom curve — hit Apply Material to bake"),
+            ('RAMP',   "Ramp",   "Multiple color stops over lifetime — hit Apply Material to bake"),
         ],
         default='SIMPLE',
     )
@@ -1111,20 +1229,32 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     )
     turbulence_strength: bpy.props.FloatProperty(
         name="Strength",
-        description="How hard the noise field pushes",
+        description="How strongly the noise field pushes particles — higher values create more violent, "
+                    "chaotic movement; lower values create a gentle drift",
         default=0.5, min=0.0, max=100.0,
         update=update_game_prop
     )
     turbulence_frequency: bpy.props.FloatProperty(
         name="Frequency",
-        description="Noise field zoom",
+        description="Controls how smooth or tight the particle movement is — "
+                    "low values produce large, slow swirling motion; "
+                    "high values produce small, rapid jittery chaos",
         default=0.5, min=0.01, max=100.0,
         update=update_game_prop
     )
     turbulence_speed: bpy.props.FloatProperty(
         name="Speed",
-        description="How fast the noise field evolves over time",
+        description="How fast the noise field evolves over time — "
+                    "low values keep the swirl pattern almost frozen; "
+                    "high values make the field churn and shift rapidly",
         default=0.5, min=0.0, max=100.0,
+        update=update_game_prop
+    )
+    turbulence_seed: bpy.props.IntProperty(
+        name="Seed",
+        description="Unique noise pattern for this emitter — change this so multiple particle "
+                    "systems don't all move in the same direction at the same time",
+        default=0, min=0, max=9999,
         update=update_game_prop
     )
 
@@ -1446,7 +1576,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         layout.separator()
         layout.prop(ps, "enabled", text="Particle Emitter")
         #Trigger
-        layout.prop(ps, "trigger_enabled", text="Play on awake")
+        layout.prop(ps, "trigger_enabled", text="Play On Awake")
         if ps.enabled:
             box = layout.box()
             box.label(text="Emission:", icon="PARTICLE_DATA")
@@ -1481,6 +1611,8 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
 
             if ps.emission_mode == 'CONTINUOUS':
                 box.prop(ps, "emission_rate")
+            elif ps.emission_mode == 'DISTANCE':
+                box.prop(ps, "emission_rate_distance", text="Particles per Unit")
             else: # BURST MODE
                 box.prop(ps, "burst_count")
                 box.prop(ps, "is_one_shot")
@@ -1513,9 +1645,12 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "billboard_facing", text="Rotation Method", icon='ORIENTATION_GIMBAL')
 
             box.prop(ps, "size_mode", text="Size Mode")
-            size_row = box.row(align=True)
-            size_row.prop(ps, "start_size")
-            size_row.prop(ps, "end_size")
+            if ps.size_mode == 'CURVE':
+                box.prop(ps, "max_size")
+            else:
+                size_row = box.row(align=True)
+                size_row.prop(ps, "start_size")
+                size_row.prop(ps, "end_size")
             if ps.size_mode == 'CURVE':
                 obj_active = context.active_object
                 if obj_active:
@@ -1530,9 +1665,22 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                                                    use_negative_slope=False)
                         box.label(text="Hit Apply Material to bake", icon='INFO')
             box.separator()
+            # Trail settings — inside Appearance box
+            box.prop(ps, "enable_trail", text="Trail")
+            if ps.enable_trail:
+                box.prop(ps, "trail_segments", text="Segments")
+                trail_col_row = box.row(align=True)
+                trail_col_row.prop(ps, "trail_color", text="Color")
+                trail_col_row.prop(ps, "trail_alpha", text="Alpha", slider=True)
+                box.prop(ps, "trail_width", text="Width (px)")
+            box.separator()
             # Material settings
             box = layout.box()
             box.label(text="Material:", icon='MATERIAL')
+
+            # Flat color — shown when Color over Lifetime is off
+            if not ps.enable_color:
+                box.prop(ps, "base_color", text="Color")
 
             # Material type — Emission (unlit) or BSDF (lit)
             box.prop(ps, "material_type", text="Type", icon='NODE_MATERIAL')
@@ -1548,22 +1696,21 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                     box.label(text="No image selected — texture slot will be empty", icon='ERROR')
             box.prop(ps, "blend_mode", text="Blend Mode")
 
-            # Flat color — shown when Color over Lifetime is off
-            if not ps.enable_color:
-                box.prop(ps, "base_color", text="Color")
-
             # Color over Lifetime
             box.prop(ps, "enable_color", text="Color over Lifetime")
             if ps.enable_color:
                 box.prop(ps, "color_mode", text="Mode")
-                row2 = box.row()
-                row2.prop(ps, "color_start", text="Start")
-                row2.prop(ps, "color_end",   text="End")
                 if ps.color_mode == 'SIMPLE':
+                    row2 = box.row()
+                    row2.prop(ps, "color_start", text="Start")
+                    row2.prop(ps, "color_end",   text="End")
                     row3 = box.row(align=True)
                     row3.prop(ps, "color_start_time", text="From")
                     row3.prop(ps, "color_end_time",   text="To")
-                else:  # CURVE
+                elif ps.color_mode == 'CURVE':
+                    row2 = box.row()
+                    row2.prop(ps, "color_start", text="Start")
+                    row2.prop(ps, "color_end",   text="End")
                     obj_active = context.active_object
                     if obj_active:
                         curve_node = get_color_curve_node(obj_active.name)
@@ -1576,6 +1723,22 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                                                        levels=False, brush=False,
                                                        use_negative_slope=False)
                             box.label(text="Hit Apply Material to bake", icon='INFO')
+                else:  # RAMP
+                    obj_active = context.active_object
+                    if obj_active:
+                        ramp_node = get_color_ramp_node(obj_active.name)
+                        if ramp_node is None:
+                            box.label(text="No ramp yet — click to create:", icon='INFO')
+                            box.operator("particle.init_color_ramp",
+                                         text="Initialize Color Ramp", icon='COLOR')
+                        else:
+                            try:
+                                box.template_color_ramp(ramp_node, "color_ramp")
+                            except Exception:
+                                box.label(text="Ramp node error — reinitialize:", icon='ERROR')
+                                box.operator("particle.init_color_ramp",
+                                             text="Re-Initialize Color Ramp", icon='COLOR')
+                            box.label(text="Ramp A channel controls alpha. Hit Apply Material to bake", icon='INFO')
 
             # Alpha over Lifetime
             box.prop(ps, "enable_alpha", text="Alpha over Lifetime")
@@ -1688,7 +1851,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.separator()
             box.prop(ps, "enable_collision", text="Enable Collision")
             if ps.enable_collision:
-                box.prop(ps, "bounce_strength", slider=True)
+                box.prop(ps, "bounce_strength")
                 if ps.bounce_strength == 0.0:
                     box.prop(ps, "stop_on_collision", text="Stop Movement")
 
@@ -1699,6 +1862,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "turbulence_strength",  text="Strength")
                 box.prop(ps, "turbulence_frequency", text="Frequency")
                 box.prop(ps, "turbulence_speed",     text="Speed")
+                box.prop(ps, "turbulence_seed",      text="Seed")
 
             # Sub-Emitter section
             box = layout.box()
@@ -1911,6 +2075,20 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
             # Sample curves once per tick (not per particle) — None means Simple mode
             _preview_curve       = (sample_color_curve(obj.name)
                                     if (ps.enable_color and ps.color_mode == 'CURVE') else None)
+            # For ramp mode: sample_color_ramp returns a stops string; parse into tuples here
+            _preview_ramp_raw    = (sample_color_ramp(obj.name)
+                                    if (ps.enable_color and ps.color_mode == 'RAMP') else None)
+            if _preview_ramp_raw:
+                _preview_ramp = []
+                for _entry in _preview_ramp_raw.split(';'):
+                    _parts = _entry.split(',')
+                    if len(_parts) == 5:
+                        _preview_ramp.append((float(_parts[0]), float(_parts[1]),
+                                              float(_parts[2]), float(_parts[3]), float(_parts[4])))
+                if len(_preview_ramp) < 2:
+                    _preview_ramp = None
+            else:
+                _preview_ramp = None
             _preview_size_curve  = (sample_size_curve(obj.name)
                                     if ps.size_mode == 'CURVE' else None)
             _preview_alpha_curve = (sample_alpha_curve(obj.name)
@@ -1977,15 +2155,18 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                             lerp(lerp(h(ix,iy,iz+1),   h(ix+1,iy,iz+1),   ux),
                                  lerp(h(ix,iy+1,iz+1), h(ix+1,iy+1,iz+1), ux), uy),
                             uz)
-                    _tt = time.time() * ps.turbulence_speed
-                    _tf = ps.turbulence_frequency
-                    _ts = ps.turbulence_strength
+                    def _preview_noise_seeded(x, y, z, so):
+                        return _preview_noise(x + so, y + so * 0.7193, z + so * 1.3571)
+                    _tt  = time.time() * ps.turbulence_speed
+                    _tf  = ps.turbulence_frequency
+                    _ts  = ps.turbulence_strength
+                    _tso = ps.turbulence_seed * 127.1
                     px = particle_obj.location.x * _tf
                     py = particle_obj.location.y * _tf
                     pz = particle_obj.location.z * _tf
-                    velocity.x += _preview_noise(px,        py,        pz        + _tt) * _ts * dt
-                    velocity.y += _preview_noise(px + 31.7, py,        pz        + _tt) * _ts * dt
-                    velocity.z += _preview_noise(px,        py + 57.3, pz        + _tt) * _ts * dt
+                    velocity.x += _preview_noise_seeded(px,        py,        pz        + _tt, _tso) * _ts * dt
+                    velocity.y += _preview_noise_seeded(px + 31.7, py,        pz        + _tt, _tso) * _ts * dt
+                    velocity.z += _preview_noise_seeded(px,        py + 57.3, pz        + _tt, _tso) * _ts * dt
 
                 # Position integration + collision (ground plane Z=0 for preview)
                 if enable_coll:
@@ -2009,45 +2190,67 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                     lo  = int(idx)
                     hi  = min(lo + 1, n1)
                     t_s = _preview_size_curve[lo] + (_preview_size_curve[hi] - _preview_size_curve[lo]) * (idx - lo)
-                    size = start_size + (end_size - start_size) * t_s
+                    size = ps.max_size * t_s
                 else:
                     size = start_size + (end_size - start_size) * life_ratio
                 particle_obj.scale = Vector((size, size, size))
 
                 # Color over lifetime
                 if ps.enable_color or ps.enable_alpha:
-                    if ps.enable_color:
-                        t = (life_ratio - col_t0) / max(col_t1 - col_t0, 0.0001)
-                        t = max(0.0, min(1.0, t))
-                        if _preview_curve:
-                            n1  = len(_preview_curve) - 1
-                            idx = t * n1
-                            lo  = int(idx)
-                            hi  = min(lo + 1, n1)
-                            t   = _preview_curve[lo] + (_preview_curve[hi] - _preview_curve[lo]) * (idx - lo)
-                        cr = col_start[0] + (col_end[0] - col_start[0]) * t
-                        cg = col_start[1] + (col_end[1] - col_start[1]) * t
-                        cb = col_start[2] + (col_end[2] - col_start[2]) * t
-                    else:
-                        cr, cg, cb = 1.0, 1.0, 1.0
-
-                    if ps.enable_alpha:
-                        t_a = (life_ratio - p_alpha_t0) / max(p_alpha_t1 - p_alpha_t0, 0.0001)
-                        t_a = max(0.0, min(1.0, t_a))
-                        if _preview_alpha_curve:
-                            # Curve mode: Y value IS the alpha
-                            n1  = len(_preview_alpha_curve) - 1
-                            idx = t_a * n1
-                            lo  = int(idx)
-                            hi  = min(lo + 1, n1)
-                            ca  = _preview_alpha_curve[lo] + (_preview_alpha_curve[hi] - _preview_alpha_curve[lo]) * (idx - lo)
-                            ca  = max(0.0, min(1.0, ca))
+                    if ps.enable_color and _preview_ramp:
+                        # Ramp mode: sample parsed stops, A channel sets alpha directly
+                        _pr = _preview_ramp
+                        _t  = max(0.0, min(1.0, life_ratio))
+                        if _t <= _pr[0][0]:
+                            cr, cg, cb, ca = _pr[0][1], _pr[0][2], _pr[0][3], _pr[0][4]
+                        elif _t >= _pr[-1][0]:
+                            cr, cg, cb, ca = _pr[-1][1], _pr[-1][2], _pr[-1][3], _pr[-1][4]
                         else:
-                            ca = p_start_alpha + (p_end_alpha - p_start_alpha) * t_a
+                            cr, cg, cb, ca = _pr[-1][1], _pr[-1][2], _pr[-1][3], _pr[-1][4]
+                            for _si in range(len(_pr) - 1):
+                                _s0 = _pr[_si]; _s1 = _pr[_si + 1]
+                                if _s0[0] <= _t <= _s1[0]:
+                                    _span = _s1[0] - _s0[0]
+                                    _f = (_t - _s0[0]) / _span if _span > 0.0001 else 0.0
+                                    cr = _s0[1] + (_s1[1] - _s0[1]) * _f
+                                    cg = _s0[2] + (_s1[2] - _s0[2]) * _f
+                                    cb = _s0[3] + (_s1[3] - _s0[3]) * _f
+                                    ca = _s0[4] + (_s1[4] - _s0[4]) * _f
+                                    break
+                        particle_obj.color = (cr, cg, cb, ca)
                     else:
-                        ca = 1.0
+                        if ps.enable_color:
+                            t = (life_ratio - col_t0) / max(col_t1 - col_t0, 0.0001)
+                            t = max(0.0, min(1.0, t))
+                            if _preview_curve:
+                                n1  = len(_preview_curve) - 1
+                                idx = t * n1
+                                lo  = int(idx)
+                                hi  = min(lo + 1, n1)
+                                t   = _preview_curve[lo] + (_preview_curve[hi] - _preview_curve[lo]) * (idx - lo)
+                            cr = col_start[0] + (col_end[0] - col_start[0]) * t
+                            cg = col_start[1] + (col_end[1] - col_start[1]) * t
+                            cb = col_start[2] + (col_end[2] - col_start[2]) * t
+                        else:
+                            cr, cg, cb = 1.0, 1.0, 1.0
 
-                    particle_obj.color = (cr, cg, cb, ca)
+                        if ps.enable_alpha:
+                            t_a = (life_ratio - p_alpha_t0) / max(p_alpha_t1 - p_alpha_t0, 0.0001)
+                            t_a = max(0.0, min(1.0, t_a))
+                            if _preview_alpha_curve:
+                                # Curve mode: Y value IS the alpha
+                                n1  = len(_preview_alpha_curve) - 1
+                                idx = t_a * n1
+                                lo  = int(idx)
+                                hi  = min(lo + 1, n1)
+                                ca  = _preview_alpha_curve[lo] + (_preview_alpha_curve[hi] - _preview_alpha_curve[lo]) * (idx - lo)
+                                ca  = max(0.0, min(1.0, ca))
+                            else:
+                                ca = p_start_alpha + (p_end_alpha - p_start_alpha) * t_a
+                        else:
+                            ca = 1.0
+
+                        particle_obj.color = (cr, cg, cb, ca)
 
                 # Billboard orientation — mirrors the runtime's two-method system.
                 if is_billboard:
@@ -2286,7 +2489,12 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
 
         # Set initial properties
         particle_obj.location = spawn_pos
-        particle_obj.scale = Vector((ps.start_size, ps.start_size, ps.start_size))
+        if ps.size_mode == 'CURVE':
+            _sc = sample_size_curve(obj.name)
+            _spawn_s = ps.max_size * _sc[0] if _sc else ps.max_size
+        else:
+            _spawn_s = ps.start_size
+        particle_obj.scale = Vector((_spawn_s, _spawn_s, _spawn_s))
 
         # Calculate random velocity
         base_vel = Vector(ps.start_velocity)
@@ -2502,7 +2710,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
 
         script_text = """# UPBGE Particle System Runtime
 
-from bge import logic
+from bge import logic, render
 from mathutils import Vector, Matrix
 import random
 import math
@@ -2524,7 +2732,8 @@ class Particle:
                  'orbit_angle', 'orbit_speed', 'orbit_radius',
                  'orbit_center', 'orbit_basis_u', 'orbit_basis_v',
                  'roll_angle', 'roll_speed',
-                 'is_stopped')
+                 'is_stopped',
+                 'trail_positions')  # list of (time, Vector) — ring buffer for trail
     def __init__(self):
         self.position        = Vector((0.0, 0.0, 0.0))
         self.velocity        = Vector((0.0, 0.0, 0.0))
@@ -2546,6 +2755,7 @@ class Particle:
         self.roll_angle      = 0.0
         self.roll_speed      = 0.0
         self.is_stopped      = False
+        self.trail_positions = []   # list of [timestamp, x, y, z] — plain lists, no Vector alloc
 class ParticleSystem:
     __slots__ = (
         # Identity & pool
@@ -2557,16 +2767,16 @@ class ParticleSystem:
         '_acc', '_acc_per_sec',
         '_lifetime', '_lifetime_random',
         '_start_velocity', '_velocity_random', '_emission_shape',
-        '_size_start', '_size_delta', '_size_curve',
+        '_size_start', '_size_delta', '_size_max', '_size_curve',
         '_drag_start', '_drag_end', '_resistance',
         '_enable_collision', '_bounce', '_stop_on_collision',
-        '_enable_color', '_color_start', '_color_end', '_color_curve',
+        '_enable_color', '_color_start', '_color_end', '_color_curve', '_color_ramp',
         '_color_t_start', '_color_t_end',
         '_enable_alpha', '_start_alpha', '_end_alpha', '_alpha_t_start', '_alpha_t_end', '_alpha_curve',
         '_has_torque', '_torque_per_sec', '_torque_rad',
         '_rot_has_value', '_rot_rad',
         # Turbulence
-        '_turb_enabled', '_turb_strength', '_turb_frequency', '_turb_speed', '_turb_time',
+        '_turb_enabled', '_turb_strength', '_turb_frequency', '_turb_speed', '_turb_time', '_turb_seed',
         # LOD
         '_lod_enabled', '_lod_level', '_lod_start', '_lod_table', '_lod_levels_count',
         # System Launcher
@@ -2588,8 +2798,18 @@ class ParticleSystem:
         '_sub_birth_enabled',   '_sub_birth_name',   '_sub_birth_inherit_vel',
         '_sub_coll_enabled',    '_sub_coll_name',    '_sub_coll_inherit_vel',
         # Follow Object
-        '_follow_enabled',      # True when the emitter should mirror a target object
-        '_follow_object_name',  # name of the target object to look up in scene.objects
+        '_follow_enabled',
+        '_follow_object_name',
+        # Rate over Distance emission
+        '_dist_accumulator',    # fractional distance units accumulated since last spawn
+        '_prev_emit_pos',       # emitter world position from the previous frame
+        '_emission_rate_dist',  # cached particles-per-unit value
+        # Trail
+        '_trail_enabled',
+        '_trail_segments',      # int — max positions stored per particle
+        '_trail_color',         # (r, g, b) tuple
+        '_trail_alpha',
+        '_trail_width',
     )
 
     def __init__(self, emitter_obj):
@@ -2611,6 +2831,7 @@ class ParticleSystem:
         self._emission_shape   = 'POINT'
         self._size_start       = 0.1
         self._size_delta      = 0.0   # end_size - start_size, pre-subtracted
+        self._size_max        = 0.1   # max size for Curve mode
         self._size_curve      = None  # None = Simple linear; list of floats = Curve mode
         self._alpha_curve     = None  # None = Simple linear; list of floats = Curve mode
         self._drag_start      = 0.0
@@ -2622,7 +2843,9 @@ class ParticleSystem:
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
         self._is_billboard    = False
         self._color_curve     = None   # None = Simple linear; list of floats = Curve mode
+        self._color_ramp      = None   # None = not Ramp mode; list of (pos,r,g,b,a) tuples
         self._turb_time       = 0.0  # Turbulence time accumulator
+        self._turb_seed       = 0    # Noise seed — offsets lookup coords per emitter
         self._lod_level       = 0    # Current active LOD level (0 = full sim)
         self._lod_levels_count = 3   # How many LOD entries are active (1/2/3)
         # System Launcher
@@ -2663,6 +2886,16 @@ class ParticleSystem:
         # Follow Object
         self._follow_enabled     = False
         self._follow_object_name = ''
+        # Rate over Distance
+        self._dist_accumulator   = 0.0
+        self._prev_emit_pos      = None   # None on first frame — skip first delta
+        self._emission_rate_dist = 5.0
+        # Trail
+        self._trail_enabled  = False
+        self._trail_segments = 12
+        self._trail_color    = (1.0, 1.0, 1.0)
+        self._trail_alpha    = 0.8
+        self._trail_width    = 1
         self.load_properties()
         self.create_particle_template()
         self.initialize_pool()
@@ -2811,6 +3044,17 @@ class ParticleSystem:
             g('ps_sub_coll_inherit_vel',      False),      # 128
             g('ps_follow_enabled',            False),      # 129 — follow object enabled
             g('ps_follow_object',             ' '),        # 130 — name of object to follow
+            g('ps_emission_rate_dist',        5.0),        # 131 — particles per world-unit of movement
+            g('ps_max_size',                  0.1),        # 132 — max size for Curve mode
+            g('ps_turb_seed',                 0),          # 133 — turbulence noise seed
+            g('ps_color_ramp',                '  '),       # 134 — baked color ramp stops
+            g('ps_trail_enabled',             False),      # 135 — trail on/off
+            g('ps_trail_segments',            12),         # 136 — number of position samples
+            g('ps_trail_color_r',             1.0),        # 137 — trail head color R
+            g('ps_trail_color_g',             1.0),        # 138 — trail head color G
+            g('ps_trail_color_b',             1.0),        # 139 — trail head color B
+            g('ps_trail_alpha',               0.8),        # 140 — trail head brightness
+            g('ps_trail_width',               1),          # 141 — line width in pixels
         )
 
     def _build_props_from_raw(self, r):
@@ -2940,6 +3184,17 @@ class ParticleSystem:
             'sub_coll_inherit_vel':   r[128],
             'follow_enabled':         r[129],
             'follow_object':          r[130],
+            'emission_rate_dist':     r[131],
+            'max_size':               r[132],
+            'turb_seed':              r[133],
+            'color_ramp':             r[134],
+            'trail_enabled':          r[135],
+            'trail_segments':         r[136],
+            'trail_color_r':          r[137],
+            'trail_color_g':          r[138],
+            'trail_color_b':          r[139],
+            'trail_alpha':            r[140],
+            'trail_width':            r[141],
         }
 
     def load_properties(self):
@@ -2975,6 +3230,7 @@ class ParticleSystem:
         self._size_start = p['start_size']
         self._size_delta = p['end_size'] - p['start_size']
         self._size_curve = self._parse_curve(p.get('size_curve', ''))
+        self._size_max   = p.get('max_size', p['start_size'])  # Curve mode max
         self._enable_collision  = p['enable_collision']
         self._bounce            = p['bounce_strength']
         self._stop_on_collision = p['stop_on_collision']
@@ -3037,8 +3293,10 @@ class ParticleSystem:
         self._color_end        = p['color_end']
         # Parse baked curve samples (comma-sep floats). Non-empty = Curve mode.
         self._color_curve = self._parse_curve(p.get('color_curve', ''))
-        # Curve mode spans the full lifetime (0→1); From/To only used in Simple mode
-        if self._color_curve:
+        # Parse baked ramp stops. Non-empty = Ramp mode (takes priority over curve).
+        self._color_ramp  = self._parse_ramp(p.get('color_ramp', ''))
+        # Curve/Ramp mode spans full lifetime (0->1); From/To only used in Simple mode
+        if self._color_curve or self._color_ramp:
             self._color_t_start = 0.0
             self._color_t_end   = 1.0
         else:
@@ -3063,6 +3321,7 @@ class ParticleSystem:
         self._turb_strength  = p['turb_strength']
         self._turb_frequency = p['turb_frequency']
         self._turb_speed     = p['turb_speed']
+        self._turb_seed      = p.get('turb_seed', 0)
 
         # LOD settings — cache the full table once per props change
         self._lod_enabled  = p['enable_lod']
@@ -3104,7 +3363,7 @@ class ParticleSystem:
         axis  = Vector((sign * ax / mag, sign * ay / mag, sign * az / mag))
         # Tilt: rotate the axis itself around a perpendicular vector.
         # Rodrigues (rot ⊥ axis, so axis·rot = 0):
-        #   axis' = axis·cos(θ) + (rot × axis)·sin(θ)
+        #   axis' = axis·cos(θ) + (rot x axis)·sin(θ)
         tilt_deg = p.get('orbit_tilt', 0.0)
         if tilt_deg != 0.0:
             theta = tilt_deg * (_pi / 180.0)
@@ -3161,6 +3420,17 @@ class ParticleSystem:
         self._follow_enabled     = p.get('follow_enabled', False)
         self._follow_object_name = p.get('follow_object', ' ').strip()
 
+        # Rate over Distance
+        self._emission_rate_dist = p.get('emission_rate_dist', 5.0)
+        # Trail
+        self._trail_enabled  = p.get('trail_enabled', False)
+        self._trail_segments = int(p.get('trail_segments', 12))
+        self._trail_color    = (p.get('trail_color_r', 1.0),
+                                p.get('trail_color_g', 1.0),
+                                p.get('trail_color_b', 1.0))
+        self._trail_alpha    = p.get('trail_alpha', 0.8)
+        self._trail_width    = int(p.get('trail_width', 1))
+
     # ------------------------------------------------------------------
     # Turbulence noise
     # ------------------------------------------------------------------
@@ -3183,6 +3453,14 @@ class ParticleSystem:
                  lerp(h(ix,iy+1,iz+1), h(ix+1,iy+1,iz+1), ux), uy),
             uz)
 
+    @staticmethod
+    def _value_noise3_seeded(x, y, z, seed_offset):
+        # Seed-aware wrapper - shifts all three lookup axes by a unique per-seed
+        # offset so different emitters sample completely different regions of the
+        # noise field even when their particles occupy the same world positions.
+        so = seed_offset
+        return ParticleSystem._value_noise3(x + so, y + so * 0.7193, z + so * 1.3571)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -3196,6 +3474,49 @@ class ParticleSystem:
             return [float(v) for v in raw.split(',')]
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_ramp(raw):
+        # Parse 'pos,R,G,B,A;pos,R,G,B,A;...' into list of (pos,r,g,b,a) tuples.
+        # Returns None when the string is blank (not RAMP mode).
+        if not raw or not raw.strip():
+            return None
+        try:
+            stops = []
+            for entry in raw.split(';'):
+                parts = entry.split(',')
+                if len(parts) == 5:
+                    stops.append((float(parts[0]), float(parts[1]),
+                                  float(parts[2]), float(parts[3]), float(parts[4])))
+            return stops if len(stops) >= 2 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _sample_ramp(stops, t):
+        # Linear interpolation between the two surrounding stops.
+        # t is clamped to [0, 1].
+        t = max(0.0, min(1.0, t))
+        # Below first stop
+        if t <= stops[0][0]:
+            s = stops[0]
+            return s[1], s[2], s[3], s[4]
+        # Above last stop
+        if t >= stops[-1][0]:
+            s = stops[-1]
+            return s[1], s[2], s[3], s[4]
+        # Find surrounding pair
+        for i in range(len(stops) - 1):
+            p0 = stops[i];  p1 = stops[i + 1]
+            if p0[0] <= t <= p1[0]:
+                span = p1[0] - p0[0]
+                f = (t - p0[0]) / span if span > 0.0001 else 0.0
+                return (p0[1] + (p1[1] - p0[1]) * f,
+                        p0[2] + (p1[2] - p0[2]) * f,
+                        p0[3] + (p1[3] - p0[3]) * f,
+                        p0[4] + (p1[4] - p0[4]) * f)
+        s = stops[-1]
+        return s[1], s[2], s[3], s[4]
     # Pool management
     # ------------------------------------------------------------------
     def create_particle_template(self):
@@ -3258,6 +3579,9 @@ class ParticleSystem:
             p.obj.worldScale = [0.0, 0.0, 0.0]
             p.obj.visible = False
         self.inactive_stack.append(p.pool_idx)
+        # Clear trail history so it doesn't ghost after respawn
+        if p.trail_positions:
+            p.trail_positions.clear()
 
         # Sub-emitter: burst from the death position
         if self._sub_emitter_enabled and self._sub_emitter_name and self._sub_emitter_name.strip() and death_pos is not None:
@@ -3418,7 +3742,11 @@ class ParticleSystem:
         p.local_offset.z = spawn_local_offset.z
         p.age      = 0.0
         p.lifetime = lifetime
-        p.size     = self._size_start
+        # In Curve mode the curve drives size — use curve[0]*max_size as spawn size
+        if self._size_curve:
+            p.size = self._size_max * self._size_curve[0]
+        else:
+            p.size = self._size_start
         p.rotation.x = 0.0; p.rotation.y = 0.0; p.rotation.z = 0.0
         p.angular_velocity.x = 0.0; p.angular_velocity.y = 0.0; p.angular_velocity.z = 0.0
         p.roll_angle = 0.0
@@ -3462,7 +3790,7 @@ class ParticleSystem:
 
         if p.obj:
             p.obj.worldPosition = spawn_pos
-            s = self._size_start
+            s = (self._size_max * self._size_curve[0]) if self._size_curve else self._size_start
             p.obj.worldScale = [s, s, s]
             p.obj.visible = True
 
@@ -3547,6 +3875,18 @@ class ParticleSystem:
                     self.emitter.worldOrientation = _target.worldOrientation
             except Exception:
                 pass  # target removed mid-game — fail silently, keep last position
+
+        # ── Rate over Distance — position tracking ─────────────────────
+        # Measure how far the emitter moved this frame AFTER the follow-object
+        # transform has been applied, so the delta correctly reflects the
+        # target's motion when Follow Object is active.
+        # _prev_emit_pos is None on the first frame to avoid a teleport spike.
+        cur_emit_pos = self.emitter.worldPosition.copy()
+        if self._prev_emit_pos is not None:
+            _frame_dist_moved = (cur_emit_pos - self._prev_emit_pos).length
+        else:
+            _frame_dist_moved = 0.0
+        self._prev_emit_pos = cur_emit_pos
 
         # One scene/camera fetch per update() call, shared by launcher, LOD, and billboard.
         _frame_scene = logic.getCurrentScene()
@@ -3673,6 +4013,28 @@ class ParticleSystem:
                             self.emit_particle()
                         self.time_since_emit -= interval
 
+            elif mode == 'DISTANCE':
+                # Emit based on world-space distance travelled this frame.
+                # _dist_accumulator holds the fractional remainder from the previous
+                # frame so short movements still eventually yield a particle.
+                # dist_per_particle = 1.0 / rate_over_distance
+                # e.g. rate=5 → one particle per 0.2 units of movement
+                if trigger and _frame_dist_moved > 0.0:
+                    rate_dist = self._emission_rate_dist
+                    if rate_dist > 0.0:
+                        self._dist_accumulator += _frame_dist_moved * rate_dist
+                        # Spawn whole particles and keep the fractional remainder
+                        spawn_count = int(self._dist_accumulator)
+                        self._dist_accumulator -= spawn_count
+                        for _ in range(spawn_count):
+                            active_count = len(self.particle_pool) - len(self.inactive_stack)
+                            if active_count < lod_max_particles:
+                                self.emit_particle()
+                elif not trigger:
+                    # Reset accumulator when trigger is released so the emitter
+                    # doesn't burst on re-trigger after a stationary pause.
+                    self._dist_accumulator = 0.0
+
             elif mode == 'BURST':
                 if props['is_one_shot']:
                     if trigger and not self.burst_triggered:
@@ -3695,6 +4057,7 @@ class ParticleSystem:
         stop_on_collision = self._stop_on_collision
         size_start       = self._size_start
         size_delta       = self._size_delta
+        size_max         = self._size_max
         size_curve       = self._size_curve   # None = Simple; list = Curve
         rot_has_value    = self._rot_has_value
         is_billboard     = self._is_billboard
@@ -3723,7 +4086,8 @@ class ParticleSystem:
         turb_strength  = self._turb_strength
         turb_freq      = self._turb_frequency
         turb_time      = self._turb_time
-        _noise         = ParticleSystem._value_noise3
+        turb_seed_off  = self._turb_seed * 127.1  # float offset that uniquely shifts the noise field
+        _noise         = ParticleSystem._value_noise3_seeded
 
         # Orbit locals — hoisted outside loop for zero attribute lookup per particle
         is_orbit         = self._is_orbit
@@ -3742,6 +4106,7 @@ class ParticleSystem:
         # Color & alpha locals — LOD overrides applied on top
         enable_color  = self._enable_color
         color_curve   = self._color_curve   # None = Simple; list = Curve
+        color_ramp    = self._color_ramp    # None = not Ramp; list of stops = Ramp
         enable_alpha  = self._enable_alpha
         color_start   = self._color_start
         color_end     = self._color_end
@@ -3752,6 +4117,13 @@ class ParticleSystem:
         alpha_curve   = self._alpha_curve   # None = Simple; list = Curve
         alpha_t_start = self._alpha_t_start
         alpha_t_end   = self._alpha_t_end
+
+        # Trail locals — hoisted so inner loop avoids repeated attr lookups
+        trail_enabled  = self._trail_enabled
+        trail_segments = self._trail_segments
+        trail_color    = self._trail_color    # (r, g, b) tuple
+        trail_alpha    = self._trail_alpha
+        trail_width    = self._trail_width
 
         for p in self.particle_pool:
             if not p.is_active:
@@ -3779,9 +4151,9 @@ class ParticleSystem:
                     px = p.position.x * turb_freq
                     py = p.position.y * turb_freq
                     pz = p.position.z * turb_freq
-                    p.velocity.x += _noise(px,        py,        pz        + turb_time) * turb_strength * dt
-                    p.velocity.y += _noise(px + 31.7, py,        pz        + turb_time) * turb_strength * dt
-                    p.velocity.z += _noise(px,        py + 57.3, pz        + turb_time) * turb_strength * dt
+                    p.velocity.x += _noise(px,        py,        pz        + turb_time, turb_seed_off) * turb_strength * dt
+                    p.velocity.y += _noise(px + 31.7, py,        pz        + turb_time, turb_seed_off) * turb_strength * dt
+                    p.velocity.z += _noise(px,        py + 57.3, pz        + turb_time, turb_seed_off) * turb_strength * dt
 
             # Capture position BEFORE integration so the ray spans exactly
             # the segment the particle travels this frame (fixes one-frame-late
@@ -3857,6 +4229,13 @@ class ParticleSystem:
             obj = p.obj
             if obj:
                 obj.worldPosition = p.position
+                # Trail: record current position, keep only last trail_segments entries
+                if trail_enabled:
+                    tp = p.trail_positions
+                    tp.append([p.position.x, p.position.y, p.position.z])
+                    # Drop oldest entries when over the cap — O(1) amortized
+                    while len(tp) > trail_segments:
+                        tp.pop(0)
                 life_ratio = p.age / p.lifetime
                 if size_curve:
                     n1  = len(size_curve) - 1
@@ -3864,7 +4243,7 @@ class ParticleSystem:
                     lo  = int(idx)
                     hi  = min(lo + 1, n1)
                     t_s = size_curve[lo] + (size_curve[hi] - size_curve[lo]) * (idx - lo)
-                    s   = size_start + size_delta * t_s
+                    s   = size_max * t_s
                 else:
                     s = size_start + size_delta * life_ratio
                 p.size = s
@@ -3873,38 +4252,43 @@ class ParticleSystem:
                 # Color & alpha — only write obj.color if at least one feature is on,
                 # avoiding an unnecessary per-particle dict write when both are disabled.
                 if enable_color or enable_alpha:
-                    if enable_color:
-                        t = (life_ratio - color_t_start) / (color_t_end - color_t_start)
-                        t = max(0.0, min(1.0, t))
-                        if color_curve:
-                            n1  = len(color_curve) - 1
-                            idx = t * n1
-                            lo  = int(idx)
-                            hi  = min(lo + 1, n1)
-                            t   = color_curve[lo] + (color_curve[hi] - color_curve[lo]) * (idx - lo)
-                        cr = color_start[0] + (color_end[0] - color_start[0]) * t
-                        cg = color_start[1] + (color_end[1] - color_start[1]) * t
-                        cb = color_start[2] + (color_end[2] - color_start[2]) * t
+                    if enable_color and color_ramp:
+                        # Ramp mode: sample stops at life_ratio, A channel drives alpha
+                        cr, cg, cb, ramp_alpha = ParticleSystem._sample_ramp(color_ramp, life_ratio)
+                        obj.color = [cr, cg, cb, ramp_alpha]
                     else:
-                        cr = cg = cb = 1.0
-
-                    if enable_alpha:
-                        t_a = (life_ratio - alpha_t_start) / (alpha_t_end - alpha_t_start)
-                        t_a = max(0.0, min(1.0, t_a))
-                        if alpha_curve:
-                            # Curve mode: Y value IS the alpha — X is lifetime (0→1)
-                            n1   = len(alpha_curve) - 1
-                            idx  = t_a * n1
-                            lo   = int(idx)
-                            hi   = min(lo + 1, n1)
-                            alpha = alpha_curve[lo] + (alpha_curve[hi] - alpha_curve[lo]) * (idx - lo)
-                            alpha = max(0.0, min(1.0, alpha))
+                        if enable_color:
+                            t = (life_ratio - color_t_start) / (color_t_end - color_t_start)
+                            t = max(0.0, min(1.0, t))
+                            if color_curve:
+                                n1  = len(color_curve) - 1
+                                idx = t * n1
+                                lo  = int(idx)
+                                hi  = min(lo + 1, n1)
+                                t   = color_curve[lo] + (color_curve[hi] - color_curve[lo]) * (idx - lo)
+                            cr = color_start[0] + (color_end[0] - color_start[0]) * t
+                            cg = color_start[1] + (color_end[1] - color_start[1]) * t
+                            cb = color_start[2] + (color_end[2] - color_start[2]) * t
                         else:
-                            alpha = start_alpha + (end_alpha - start_alpha) * t_a
-                    else:
-                        alpha = 1.0
+                            cr = cg = cb = 1.0
 
-                    obj.color = [cr, cg, cb, alpha]
+                        if enable_alpha:
+                            t_a = (life_ratio - alpha_t_start) / (alpha_t_end - alpha_t_start)
+                            t_a = max(0.0, min(1.0, t_a))
+                            if alpha_curve:
+                                # Curve mode: Y value IS the alpha — X is lifetime (0->1)
+                                n1   = len(alpha_curve) - 1
+                                idx  = t_a * n1
+                                lo   = int(idx)
+                                hi   = min(lo + 1, n1)
+                                alpha = alpha_curve[lo] + (alpha_curve[hi] - alpha_curve[lo]) * (idx - lo)
+                                alpha = max(0.0, min(1.0, alpha))
+                            else:
+                                alpha = start_alpha + (end_alpha - start_alpha) * t_a
+                        else:
+                            alpha = 1.0
+
+                        obj.color = [cr, cg, cb, alpha]
 
                 # Billboard orientation — two methods selectable per emitter:
                 #
@@ -3961,6 +4345,64 @@ class ParticleSystem:
                     p.rotation += speed * dt
                     obj.worldOrientation = [p.rotation.x, p.rotation.y, p.rotation.z]
 
+    def draw_trails(self, cur_time):
+        # drawLine takes [r, g, b] only — no alpha channel in UPBGE.
+        # "Fading" is done two ways:
+        #   1. Tail fade: segments near the tail get progressively dimmer RGB.
+        #      Any segment below a brightness threshold is SKIPPED entirely
+        #      so the trail simply ends cleanly instead of going black.
+        #   2. Death fade: as the particle approaches end-of-life, the number
+        #      of visible segments shrinks from the tail inward, so the trail
+        #      appears to retract rather than snap off.
+        if not self._trail_enabled:
+            return
+
+        draw_line   = render.drawLine
+        tr          = self._trail_color
+        base_bright = self._trail_alpha   # max brightness (0-1)
+        width       = self._trail_width
+        MIN_BRIGHT  = 0.05               # segments dimmer than this are skipped
+
+        for p in self.particle_pool:
+            if not p.is_active:
+                continue
+            tp = p.trail_positions
+            n  = len(tp)
+            if n < 2:
+                continue
+
+            # Death fade: shrink how many segments are visible from the tail.
+            # In the last 30% of lifetime the effective trail shrinks to 0 segments.
+            life_ratio    = p.age / p.lifetime if p.lifetime > 0 else 1.0
+            death_factor  = 1.0 - max(0.0, (life_ratio - 0.7) / 0.3)
+            visible_segs  = max(1, int((n - 1) * death_factor))
+
+            # Draw only the most-recent `visible_segs` segments (head end)
+            start_i = (n - 1) - visible_segs   # first index to draw from
+
+            for i in range(start_i, n - 1):
+                # Brightness: 0 at the tail end of visible range, 1 at the head
+                local_i = i - start_i
+                f = (local_i + 0.5) / visible_segs * base_bright
+
+                # Skip segments that would render as near-black
+                if f < MIN_BRIGHT:
+                    continue
+
+                col = [tr[0] * f, tr[1] * f, tr[2] * f]
+                p0  = tp[i]
+                p1  = tp[i + 1]
+                draw_line(p0, p1, col)
+
+                if width > 1:
+                    off = 0.003 * p.size
+                    for w in range(1, width):
+                        o = off * w
+                        draw_line([p0[0]+o, p0[1],   p0[2]],
+                                  [p1[0]+o, p1[1],   p1[2]], col)
+                        draw_line([p0[0],   p0[1]+o, p0[2]],
+                                  [p1[0],   p1[1]+o, p1[2]], col)
+
 class ParticleManager:
     def __init__(self):
         self.systems = {}
@@ -3991,6 +4433,10 @@ class ParticleManager:
 
         for sys in self.systems.values():
             sys.update(dt)
+            # Draw trails immediately after update so positions are fresh.
+            # bge.render.drawLine is only valid inside pre_draw — we are in pre_draw.
+            if sys._trail_enabled:
+                sys.draw_trails(cur)
 
 def init():
     if not hasattr(logic, '_pm'):
@@ -4043,7 +4489,8 @@ init()
         ensure_prop('ps_emission_ring_radius',   'FLOAT', props.emission_ring_radius)
         ensure_prop('ps_emission_ring_width',    'FLOAT', props.emission_ring_width)
         ensure_prop('ps_max_particles', 'INT', props.max_particles)
-        ensure_prop('ps_emission_rate', 'FLOAT', props.emission_rate)
+        ensure_prop('ps_emission_rate',      'FLOAT', props.emission_rate)
+        ensure_prop('ps_emission_rate_dist', 'FLOAT', props.emission_rate_distance)
         ensure_prop('ps_emission_delay', 'FLOAT', props.emission_delay)
         ensure_prop('ps_burst_count', 'INT', props.burst_count)
         ensure_prop('ps_is_one_shot', 'BOOL', props.is_one_shot)
@@ -4051,6 +4498,7 @@ init()
         ensure_prop('ps_lifetime_random', 'FLOAT', props.lifetime_random)
         ensure_prop('ps_start_size', 'FLOAT', props.start_size)
         ensure_prop('ps_end_size', 'FLOAT', props.end_size)
+        ensure_prop('ps_max_size',  'FLOAT', props.max_size)
         ensure_prop('ps_velocity_random', 'FLOAT', props.velocity_random)
 
         ensure_prop('ps_emission_box_size_x', 'FLOAT', props.emission_box_size[0])
@@ -4100,6 +4548,13 @@ init()
         ensure_prop('ps_bb_roll_speed',   'FLOAT', props.billboard_roll_speed)
         ensure_prop('ps_bb_roll_random',  'FLOAT', props.billboard_roll_random)
         ensure_prop('ps_bb_facing',       'STRING', props.billboard_facing)
+        ensure_prop('ps_trail_enabled',   'BOOL',   props.enable_trail)
+        ensure_prop('ps_trail_segments',  'INT',    props.trail_segments)
+        ensure_prop('ps_trail_color_r',   'FLOAT',  props.trail_color[0])
+        ensure_prop('ps_trail_color_g',   'FLOAT',  props.trail_color[1])
+        ensure_prop('ps_trail_color_b',   'FLOAT',  props.trail_color[2])
+        ensure_prop('ps_trail_alpha',     'FLOAT',  props.trail_alpha)
+        ensure_prop('ps_trail_width',     'INT',    props.trail_width)
 
         # Rotation properties (XYZ)
         ensure_prop('ps_rotation_x', 'FLOAT', props.rotation[0])
@@ -4114,6 +4569,7 @@ init()
         ensure_prop('ps_enable_color',     'BOOL',  props.enable_color)
         ensure_prop('ps_color_mode',       'STRING', props.color_mode)
         ensure_prop('ps_color_curve',      'STRING', '  ')
+        ensure_prop('ps_color_ramp',       'STRING', '  ')
         ensure_prop('ps_size_curve',       'STRING', '  ')
         ensure_prop('ps_alpha_curve',      'STRING', '  ')
         ensure_prop('ps_color_start_r', 'FLOAT', props.color_start[0])
@@ -4139,6 +4595,7 @@ init()
         ensure_prop('ps_turb_strength',    'FLOAT', props.turbulence_strength)
         ensure_prop('ps_turb_frequency',   'FLOAT', props.turbulence_frequency)
         ensure_prop('ps_turb_speed',       'FLOAT', props.turbulence_speed)
+        ensure_prop('ps_turb_seed',        'INT',   props.turbulence_seed)
 
         # LOD
         ensure_prop('ps_enable_lod',      'BOOL',  props.enable_lod)
@@ -4405,7 +4862,7 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
 
         self._build_nodes(mat, ps)
 
-        # Bake curve into game prop when Curve mode; clear it for Simple
+        # Bake curve/ramp into game prop; clear when not active
         if ps.enable_color and ps.color_mode == 'CURVE':
             samples   = sample_color_curve(obj.name, n=16)
             curve_str = ','.join(f'{v:.4f}' for v in samples)
@@ -4413,6 +4870,13 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
                 obj.game.properties['ps_color_curve'].value = curve_str
         elif 'ps_color_curve' in obj.game.properties:
             obj.game.properties['ps_color_curve'].value = '  '
+
+        if ps.enable_color and ps.color_mode == 'RAMP':
+            ramp_str = sample_color_ramp(obj.name)
+            if ramp_str and 'ps_color_ramp' in obj.game.properties:
+                obj.game.properties['ps_color_ramp'].value = ramp_str
+        elif 'ps_color_ramp' in obj.game.properties:
+            obj.game.properties['ps_color_ramp'].value = '  '
 
         if ps.size_mode == 'CURVE':
             samples   = sample_size_curve(obj.name, n=16)
@@ -4542,6 +5006,7 @@ classes = (
     PARTICLE_OT_init_color_curve,
     PARTICLE_OT_init_alpha_curve,
     PARTICLE_OT_init_size_curve,
+    PARTICLE_OT_init_color_ramp,
     PARTICLE_OT_remove_script,
     PARTICLE_OT_remove_props,
 )
