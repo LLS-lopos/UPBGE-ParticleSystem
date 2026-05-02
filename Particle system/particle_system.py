@@ -246,6 +246,7 @@ _PROPS_MAP = (
     ('trigger_enabled',                    'ps_trigger'),
     ('emission_mode',                    'ps_emission_mode'),
     ('emission_shape',                    'ps_emission_shape'),
+    ('emission_mesh_mode',                'ps_emission_mesh_mode'),
     ('emission_sphere_radius',                    'ps_emission_sphere_radius'),
     ('emission_hemisphere_radius',                'ps_emission_hemisphere_radius'),
     ('emission_cone_radius',                      'ps_emission_cone_radius'),
@@ -261,7 +262,8 @@ _PROPS_MAP = (
     ('burst_count',                    'ps_burst_count'),
     ('is_one_shot',                    'ps_is_one_shot'),
     ('lifetime',                    'ps_lifetime'),
-    ('lifetime_random',                    'ps_lifetime_random'),
+    ('lifetime_random',             'ps_lifetime_random'),
+    ('simulation_speed',            'ps_sim_speed'),
     ('start_size',                    'ps_start_size'),
     ('end_size',                    'ps_end_size'),
     ('max_size',                      'ps_max_size'),
@@ -285,6 +287,7 @@ _PROPS_MAP = (
     ('enable_gravity',                    'ps_enable_gravity'),
     ('gravity_power',                    'ps_gravity_power'),
     ('enable_collision',                    'ps_enable_collision'),
+    ('collision_mode',                      'ps_collision_mode'),
     ('bounce_strength',                    'ps_bounce_strength'),
     ('stop_on_collision',                  'ps_stop_on_collision'),
     ('particle_type',                    'ps_particle_type'),
@@ -330,6 +333,7 @@ _PROPS_MAP = (
     ('enable_launcher',                    'ps_launcher_enabled'),
     ('launcher_distance',                    'ps_launcher_dist'),
     ('launcher_prewarm_distance',                    'ps_launcher_prewarm'),
+    ('pool_chunk_size',                    'ps_pool_chunk_size'),
     # Orbit
     ('orbit_center',                    'ps_orbit_center'),
     ('orbit_axis_x',                    'ps_orbit_axis_x'),
@@ -432,6 +436,10 @@ def update_game_prop(self, context):
 
     if 'ps_sub_coll' in gp:
         gp['ps_sub_coll'].value = self.sub_emitter_collision_object.name if self.sub_emitter_collision_object else ' '
+    if 'ps_collision_object' in gp:
+        gp['ps_collision_object'].value = self.collision_object.name if self.collision_object else ' '
+    if 'ps_emission_mesh_object' in gp:
+        gp['ps_emission_mesh_object'].value = self.emission_mesh_object.name if self.emission_mesh_object else ' '
 
     if 'ps_color_start_r' in gp:
         gp['ps_color_start_r'].value = self.color_start[0]
@@ -624,15 +632,34 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Emission Shape",
         description="Shape from which particles are emitted",
         items=[
-            ('POINT',      "Point",      "Emit from center point"),
-            ('BOX',        "Box",        "Emit from random points within a box volume"),
-            ('SPHERE',     "Sphere",     "Emit from random points within a sphere volume"),
-            ('HEMISPHERE', "Hemisphere", "Emit from random points within the upper half-sphere (+Z)"),
-            ('CONE',       "Cone",       "Emit from random points within a cone volume — tip at emitter, opening upward"),
-            ('RING',       "Ring",       "Emit from a flat ring around the emitter"),
+            ('POINT',      "Point",       "Emit from center point"),
+            ('BOX',        "Box",         "Emit from random points within a box volume"),
+            ('SPHERE',     "Sphere",      "Emit from random points within a sphere volume"),
+            ('HEMISPHERE', "Hemisphere",  "Emit from random points within the upper half-sphere (+Z)"),
+            ('CONE',       "Cone",        "Emit from random points within a cone volume — tip at emitter, opening upward"),
+            ('RING',       "Ring",        "Emit from a flat ring around the emitter"),
+            ('MESH',       "Custom Mesh", "Emit from the surface of a chosen mesh object — positions baked once at game start"),
         ],
         default='POINT',
         update=update_wire_shape
+    )
+
+    emission_mesh_object: bpy.props.PointerProperty(
+        name="Mesh Object",
+        description="Object whose mesh surface particles will spawn from — positions baked once at game start",
+        type=bpy.types.Object,
+        update=update_game_prop
+    )
+    emission_mesh_mode: bpy.props.EnumProperty(
+        name="Mesh Spawn Mode",
+        description="How spawn points are picked from the mesh",
+        items=[
+            ('FACE',   "Random Face",   "Pick a random point on a random triangle — evenly distributed across surface area"),
+            ('VERTEX', "Random Vertex", "Snap to a random vertex — denser where vertices are closer together"),
+            ('BOTH',   "Face + Vertex", "Alternate randomly between face and vertex sampling each emission"),
+        ],
+        default='FACE',
+        update=update_game_prop
     )
 
     emission_box_size: bpy.props.FloatVectorProperty(
@@ -735,6 +762,15 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
 
     lifetime: bpy.props.FloatProperty(name="Lifetime", default=3.0, min=0.1, max=100.0, update=update_game_prop)
     lifetime_random: bpy.props.FloatProperty(name="Random Lifetime", default=0.5, min=0.0, max=1.0, update=update_game_prop)
+
+    simulation_speed: bpy.props.FloatProperty(
+        name="Simulation Speed",
+        description="Time multiplier for the entire simulation — "
+                    "0.5 = half speed slow motion, 1.0 = normal, 2.0 = double speed. "
+                    "Scales delta time before velocity, age, turbulence and all movement",
+        default=1.0, min=0.0, max=10.0,
+        update=update_game_prop
+    )
     start_size: bpy.props.FloatProperty(name="Start Size", default=0.1, min=0.001, max=50.0, update=update_game_prop)
     end_size: bpy.props.FloatProperty(name="End Size", default=0.05, min=0.001, max=50.0, update=update_game_prop)
     max_size: bpy.props.FloatProperty(
@@ -1080,6 +1116,24 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Enable Collision",
         description="Enable particle collision with surfaces",
         default=False,
+        update=update_game_prop
+    )
+
+    collision_mode: bpy.props.EnumProperty(
+        name="Collision Mode",
+        description="Which objects particles can collide with",
+        items=[
+            ('ALL',    "All Objects",   "Particles collide with every physics object in the scene"),
+            ('OBJECT', "Custom Object", "Particles only collide with a specific object you choose"),
+        ],
+        default='ALL',
+        update=update_game_prop
+    )
+
+    collision_object: bpy.props.PointerProperty(
+        name="Collision Object",
+        description="The specific object particles will collide with in Custom Object mode",
+        type=bpy.types.Object,
         update=update_game_prop
     )
 
@@ -1446,6 +1500,15 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    # Async Pool Build Controls
+    pool_chunk_size: bpy.props.IntProperty(
+        name="Pool Chunk Size",
+        description="Number of particles added to the pool per frame during async build — "
+                    "higher = faster build but more frame time spent on startup",
+        default=5, min=1, max=200,
+        update=update_game_prop
+    )
+
     # Sub-Emitter — On Death
     enable_sub_emitter: bpy.props.BoolProperty(
         name="On Death",
@@ -1583,12 +1646,11 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
 
             box.prop(ps, "emission_mode", text="Mode", icon= "POINTCLOUD_DATA")
             box.prop(ps, "emission_shape", text="Shape", icon="MESH_CONE")
-            
-            # Emit From — only for shapes with a meaningful interior or surface
-            if ps.emission_shape not in ('POINT', 'RING'):
+
+            # Emit From — not shown for POINT, RING, or MESH (they have no volume)
+            if ps.emission_shape not in ('POINT', 'RING', 'MESH'):
                 emit_row = box.row()
                 emit_row.prop(ps, "emit_from", text="Emit From")
-                # BASE is cone-only — warn if selected on another shape
                 if ps.emit_from == 'BASE' and ps.emission_shape != 'CONE':
                     box.label(text="'Base' is only available for Cone shape", icon='ERROR')
 
@@ -1606,6 +1668,13 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             elif ps.emission_shape == 'RING':
                 box.prop(ps, "emission_ring_radius", text="Ring Radius")
                 box.prop(ps, "emission_ring_width",  text="Ring Width")
+            elif ps.emission_shape == 'MESH':
+                box.prop(ps, "emission_mesh_object", text="Mesh Object")
+                if ps.emission_mesh_object is None:
+                    box.label(text="Pick a mesh object to emit from", icon='INFO')
+                else:
+                    box.prop(ps, "emission_mesh_mode", text="Spawn Mode")
+                    box.label(text="Mesh positions baked once at game start", icon='INFO')
 
             box.prop(ps, "max_particles")
 
@@ -1622,6 +1691,9 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
 
             box.prop(ps, "lifetime")
             box.prop(ps, "lifetime_random")
+
+            box.separator()
+            box.prop(ps, "simulation_speed", text="Simulation Speed")
 
             box = layout.box()
             box.label(text="Appearance:", icon="MESH_ICOSPHERE")
@@ -1851,6 +1923,11 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
             box.separator()
             box.prop(ps, "enable_collision", text="Enable Collision")
             if ps.enable_collision:
+                box.prop(ps, "collision_mode", text="Mode")
+                if ps.collision_mode == 'OBJECT':
+                    box.prop(ps, "collision_object", text="Target Object")
+                    if ps.collision_object is None:
+                        box.label(text="Pick an object to collide with", icon='INFO')
                 box.prop(ps, "bounce_strength")
                 if ps.bounce_strength == 0.0:
                     box.prop(ps, "stop_on_collision", text="Stop Movement")
@@ -1926,6 +2003,11 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                     sl_box.prop(ps, "launcher_distance", text="Active Distance")
 
                 sl_box.prop(ps, "launcher_prewarm_distance", text="Pre-warm Distance")
+
+            # Async Pool Build Controls
+            build_box = box.box()
+            build_box.label(text="Pool Build:", icon='TIME')
+            build_box.prop(ps, "pool_chunk_size", text="Chunk Size (particles/frame)")
 
             box.prop(ps, "enable_lod", text="Enable LOD")
             # LOD
@@ -2711,6 +2793,7 @@ class PARTICLE_OT_setup_logic(bpy.types.Operator):
         script_text = """# UPBGE Particle System Runtime
 
 from bge import logic, render
+from bge.types import KX_Camera   # for OUTSIDE / INTERSECT / INSIDE frustum constants
 from mathutils import Vector, Matrix
 import random
 import math
@@ -2770,6 +2853,7 @@ class ParticleSystem:
         '_size_start', '_size_delta', '_size_max', '_size_curve',
         '_drag_start', '_drag_end', '_resistance',
         '_enable_collision', '_bounce', '_stop_on_collision',
+        '_collision_mode', '_collision_object_name',
         '_enable_color', '_color_start', '_color_end', '_color_curve', '_color_ramp',
         '_color_t_start', '_color_t_end',
         '_enable_alpha', '_start_alpha', '_end_alpha', '_alpha_t_start', '_alpha_t_end', '_alpha_curve',
@@ -2801,15 +2885,25 @@ class ParticleSystem:
         '_follow_enabled',
         '_follow_object_name',
         # Rate over Distance emission
-        '_dist_accumulator',    # fractional distance units accumulated since last spawn
-        '_prev_emit_pos',       # emitter world position from the previous frame
-        '_emission_rate_dist',  # cached particles-per-unit value
+        '_dist_accumulator',
+        '_prev_emit_pos',
+        '_emission_rate_dist',
         # Trail
         '_trail_enabled',
-        '_trail_segments',      # int — max positions stored per particle
-        '_trail_color',         # (r, g, b) tuple
+        '_trail_segments',
+        '_trail_color',
         '_trail_alpha',
         '_trail_width',
+        # Async pool building
+        '_pool_building',   # True while pool is being built across frames
+        '_pool_gen',        # generator iterator — None when idle
+        '_pool_chunk',      # objects to add per frame during build
+        # Simulation speed
+        '_sim_speed',
+        # Custom mesh emission — baked at init
+        '_mesh_verts',       # list of [x,y,z] — for VERTEX mode
+        '_mesh_face_tris',   # list of ((ax,ay,az),(bx,by,bz),(cx,cy,cz)) — for FACE mode
+        '_mesh_mode',        # 'FACE' / 'VERTEX' / 'BOTH'
     )
 
     def __init__(self, emitter_obj):
@@ -2840,6 +2934,8 @@ class ParticleSystem:
         self._enable_collision  = False
         self._bounce            = 0.5
         self._stop_on_collision = False
+        self._collision_mode         = 'ALL'
+        self._collision_object_name  = ''
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
         self._is_billboard    = False
         self._color_curve     = None   # None = Simple linear; list of floats = Curve mode
@@ -2896,6 +2992,16 @@ class ParticleSystem:
         self._trail_color    = (1.0, 1.0, 1.0)
         self._trail_alpha    = 0.8
         self._trail_width    = 1
+        # Async pool building
+        self._pool_building  = False
+        self._pool_gen       = None
+        self._pool_chunk     = 5
+        # Simulation speed / fixed FPS
+        self._sim_speed      = 1.0
+        # Custom mesh emission
+        self._mesh_verts     = []
+        self._mesh_face_tris = []
+        self._mesh_mode      = 'FACE'
         self.load_properties()
         self.create_particle_template()
         self.initialize_pool()
@@ -3055,6 +3161,12 @@ class ParticleSystem:
             g('ps_trail_color_b',             1.0),        # 139 — trail head color B
             g('ps_trail_alpha',               0.8),        # 140 — trail head brightness
             g('ps_trail_width',               1),          # 141 — line width in pixels
+            g('ps_collision_mode',            'ALL'),      # 142 — 'ALL' or 'OBJECT'
+            g('ps_collision_object',          ' '),        # 143 — target object name for OBJECT mode
+            g('ps_pool_chunk_size',           5),          # 144 — particles per frame during async build
+            g('ps_sim_speed',                 1.0),        # 145 — simulation time multiplier
+            g('ps_emission_mesh_object',      ' '),        # 146 — mesh object name for MESH shape
+            g('ps_emission_mesh_mode',        'FACE'),     # 147 — FACE / VERTEX / BOTH
         )
 
     def _build_props_from_raw(self, r):
@@ -3097,6 +3209,12 @@ class ParticleSystem:
             'enable_collision':       r[39],
             'bounce_strength':        r[40],
             'stop_on_collision':      r[41],
+            'collision_mode':         r[142],
+            'collision_object':       r[143],
+            'pool_chunk_size':        r[144],
+            'sim_speed':              r[145],
+            'emission_mesh_object':   r[146],
+            'emission_mesh_mode':     r[147],
             'rotation':              (r[42], r[43], r[44]),
             'particle_type':          r[45],
             'billboard_template':     r[46],
@@ -3234,6 +3352,8 @@ class ParticleSystem:
         self._enable_collision  = p['enable_collision']
         self._bounce            = p['bounce_strength']
         self._stop_on_collision = p['stop_on_collision']
+        self._collision_mode         = str(p.get('collision_mode', 'ALL'))
+        self._collision_object_name  = str(p.get('collision_object', ' ')).strip()
 
         grav_z = p['gravity_power'] if p['enable_gravity'] else 0.0
         grav_w = Vector((0.0, 0.0, grav_z))
@@ -3407,21 +3527,29 @@ class ParticleSystem:
 
         # Sub-Emitter — name looked up in ParticleManager.systems at event time
         self._sub_emitter_enabled     = p.get('sub_emitter_enabled',    False)
-        self._sub_emitter_name        = p.get('sub_emitter',            ' ').strip()
+        self._sub_emitter_name        = str(p.get('sub_emitter',            ' ')).strip()
         self._sub_emitter_inherit_vel = p.get('sub_emitter_inherit_vel', False)
         self._sub_birth_enabled       = p.get('sub_birth_enabled',      False)
-        self._sub_birth_name          = p.get('sub_birth',              ' ').strip()
+        self._sub_birth_name          = str(p.get('sub_birth',              ' ')).strip()
         self._sub_birth_inherit_vel   = p.get('sub_birth_inherit_vel',  False)
         self._sub_coll_enabled        = p.get('sub_coll_enabled',       False)
-        self._sub_coll_name           = p.get('sub_coll',               ' ').strip()
+        self._sub_coll_name           = str(p.get('sub_coll',               ' ')).strip()
         self._sub_coll_inherit_vel    = p.get('sub_coll_inherit_vel',   False)
 
         # Follow Object — name stripped of sentinel space
         self._follow_enabled     = p.get('follow_enabled', False)
-        self._follow_object_name = p.get('follow_object', ' ').strip()
+        self._follow_object_name = str(p.get('follow_object', ' ')).strip()
 
         # Rate over Distance
         self._emission_rate_dist = p.get('emission_rate_dist', 5.0)
+        self._sim_speed          = max(0.0, float(p.get('sim_speed', 1.0)))
+
+        # Custom mesh emission — bake when shape is MESH and data not yet loaded
+        self._mesh_mode = str(p.get('emission_mesh_mode', 'FACE'))
+        if self._emission_shape == 'MESH' and not self._mesh_verts and not self._mesh_face_tris:
+            mesh_obj_name = str(p.get('emission_mesh_object', ' ')).strip()
+            if mesh_obj_name:
+                self._bake_mesh_data(mesh_obj_name)
         # Trail
         self._trail_enabled  = p.get('trail_enabled', False)
         self._trail_segments = int(p.get('trail_segments', 12))
@@ -3468,7 +3596,10 @@ class ParticleSystem:
     def _parse_curve(raw):
         # Parse comma-separated floats into a list.
         # Returns None for Simple mode (blank/whitespace-only value).
-        if not raw or not raw.strip():
+        if raw is None:
+            return None
+        raw = str(raw)
+        if not raw.strip():
             return None
         try:
             return [float(v) for v in raw.split(',')]
@@ -3479,7 +3610,10 @@ class ParticleSystem:
     def _parse_ramp(raw):
         # Parse 'pos,R,G,B,A;pos,R,G,B,A;...' into list of (pos,r,g,b,a) tuples.
         # Returns None when the string is blank (not RAMP mode).
-        if not raw or not raw.strip():
+        if raw is None:
+            return None
+        raw = str(raw)
+        if not raw.strip():
             return None
         try:
             stops = []
@@ -3539,26 +3673,96 @@ class ParticleSystem:
             else:
                 print(f"✗ ERROR: '{mesh_name}' not in objectsInactive!")
 
+    def _bake_mesh_data(self, obj_name):
+        # Bake vertex and triangle data from a Blender mesh object.
+        # Uses bpy.data (always available at game start) instead of KX_MeshProxy
+        # which is unreliable in UPBGE 0.3+ (physics-shape only, limited API).
+        # World transform is applied so positions match the object in the scene.
+        import bpy as _bpy
+        bl_obj = _bpy.data.objects.get(obj_name)
+        if bl_obj is None or bl_obj.type != 'MESH':
+            print(f"Mesh emission: '{obj_name}' not found or not a mesh")
+            return
+
+        mesh     = bl_obj.data
+        world_mat = bl_obj.matrix_world
+        verts = []
+        tris  = []
+
+        # Bake world-space vertex positions
+        for v in mesh.vertices:
+            wx, wy, wz = world_mat @ v.co
+            verts.append([wx, wy, wz])
+
+        # Bake triangulated faces (works on any n-gon mesh)
+        for poly in mesh.polygons:
+            loop_verts = [mesh.loops[li].vertex_index for li in poly.loop_indices]
+            # Fan triangulation: (0,1,2), (0,2,3), (0,3,4) ...
+            for i in range(1, len(loop_verts) - 1):
+                ai = loop_verts[0]
+                bi = loop_verts[i]
+                ci = loop_verts[i + 1]
+                a = verts[ai]
+                b = verts[bi]
+                c = verts[ci]
+                tris.append((a, b, c))
+
+        self._mesh_verts     = verts
+        self._mesh_face_tris = tris
+        print(f"Mesh emission baked: {len(verts)} verts, {len(tris)} tris from '{obj_name}'")
+
     def initialize_pool(self):
         if not self.particle_template:
             return
-        scene = logic.getCurrentScene()
-        max_p = self.props['max_particles']
-        print(f"Creating particle pool: {max_p} particles...")
-        zero3 = [0.0, 0.0, 0.0]
-        for i in range(max_p):
+        max_p            = self.props['max_particles']
+        self._pool_chunk = max(1, int(self.props.get('pool_chunk_size', 5)))
+        self._pool_building = True
+        self._pool_gen      = self._pool_build_gen()
+        print(f"Async pool build started: {max_p} particles "
+              f"({self._pool_chunk}/frame)")
+
+    def _pool_build_gen(self):
+        # Generator — called by _pump_pool_gen() a few iterations per frame.
+        scene    = logic.getCurrentScene()
+        max_p    = self.props['max_particles']
+        zero3    = [0.0, 0.0, 0.0]
+        built    = 0
+        start_idx = len(self.particle_pool)  # resume index if pool already has entries
+        for i in range(start_idx, max_p):
             p = Particle()
             try:
                 p.obj = scene.addObject(self.particle_template, self.emitter, 0)
                 p.obj.worldScale = zero3
-                p.obj.visible = False
+                p.obj.visible    = False
             except Exception as e:
-                print(f"Pool creation error: {e}")
+                print(f"Pool build error at idx {i}: {e}")
+                yield  # keep going even if one slot fails
                 continue
             p.pool_idx = i
             self.particle_pool.append(p)
-            self.inactive_stack.append(i)   # All start inactive
-        print(f"✓ Pool ready: {len(self.particle_pool)} particles")
+            self.inactive_stack.append(i)
+            built += 1
+            yield   # hand control back to the game loop
+
+        self._pool_building = False
+        self._pool_gen      = None
+        print(f"Pool ready: {len(self.particle_pool)} particles")
+
+    def _pump_pool_gen(self):
+        # Advance the pool generator by _pool_chunk steps.
+        # Called once per frame from update() while _pool_building is True.
+        gen = self._pool_gen
+        if gen is None:
+            self._pool_building = False
+            return
+        chunk = self._pool_chunk
+        for _ in range(chunk):
+            try:
+                next(gen)
+            except StopIteration:
+                self._pool_building = False
+                self._pool_gen      = None
+                break
 
     def get_inactive_particle(self):
         '''O(1) pop from inactive stack instead of O(n) linear scan'''
@@ -3714,6 +3918,31 @@ class ParticleSystem:
         else:  # POINT
             spawn_pos = emitter_pos.copy()
 
+        # MESH shape — overrides spawn_pos entirely with baked mesh data
+        if emission_shape == 'MESH':
+            use_face   = self._mesh_face_tris and (self._mesh_mode == 'FACE' or
+                         (self._mesh_mode == 'BOTH' and _random() < 0.5))
+            if use_face and self._mesh_face_tris:
+                # Random point on a random triangle via barycentric coords
+                tri = self._mesh_face_tris[int(_random() * len(self._mesh_face_tris))]
+                a, b, c = tri
+                r1 = _sqrt(_random())
+                r2 = _random()
+                u  = 1.0 - r1
+                v  = r1 * (1.0 - r2)
+                w  = r1 * r2
+                spawn_pos = Vector((
+                    u * a[0] + v * b[0] + w * c[0],
+                    u * a[1] + v * b[1] + w * c[1],
+                    u * a[2] + v * b[2] + w * c[2],
+                ))
+            elif self._mesh_verts:
+                # Random vertex
+                v = self._mesh_verts[int(_random() * len(self._mesh_verts))]
+                spawn_pos = Vector((v[0], v[1], v[2]))
+            else:
+                spawn_pos = emitter_pos.copy()
+
         # Velocity
         vr = self._velocity_random
         sv = self._start_velocity
@@ -3827,6 +4056,15 @@ class ParticleSystem:
     # Main update
     # ------------------------------------------------------------------
     def update(self, dt):
+        # Advance async pool build if still in progress — adds _pool_chunk
+        # objects per frame so the game stays responsive during startup.
+        if self._pool_building:
+            self._pump_pool_gen()
+
+        # Simulation Speed — scale dt before everything else.
+        # 0.5 = slow motion, 1.0 = normal, 2.0 = double speed.
+        dt *= self._sim_speed
+
         prev_mesh = self.props.get('particle_mesh')
         prev_type = self.props.get('particle_type')
 
@@ -3839,6 +4077,9 @@ class ParticleSystem:
         mesh_changed = self.props.get('particle_mesh') != prev_mesh
         if type_changed or mesh_changed:
             scene = logic.getCurrentScene()
+            # Cancel any in-progress async build before destroying the pool
+            self._pool_building = False
+            self._pool_gen      = None
             for p in self.particle_pool:
                 if p.is_active:
                     self.deactivate_particle(p)
@@ -3926,6 +4167,8 @@ class ParticleSystem:
 
                     elif new_state == 'INACTIVE' and self._pool_built:
                         # Leaving prewarm -- tear down pool to free VRAM
+                        self._pool_building = False
+                        self._pool_gen      = None
                         for p in self.particle_pool:
                             if p.is_active:
                                 self.deactivate_particle(p)
@@ -4055,6 +4298,8 @@ class ParticleSystem:
         enable_collision  = self._enable_collision and not lod_no_coll
         bounce            = self._bounce
         stop_on_collision = self._stop_on_collision
+        coll_mode         = self._collision_mode
+        coll_obj_name     = self._collision_object_name
         size_start       = self._size_start
         size_delta       = self._size_delta
         size_max         = self._size_max
@@ -4074,6 +4319,14 @@ class ParticleSystem:
 
         # Hoist billboard camera lookup outside the loop — same camera for all particles this frame
         bb_cam = _frame_cam if is_billboard else None
+
+        # Frustum culling — skip GPU writes for particles outside the camera view.
+        # sphereInsideFrustum(pos, radius) is cheap (6 plane dot products) and avoids
+        # submitting invisible particles to the rasterizer entirely.
+        # We use particle size * 1.5 as a conservative cull radius so particles at
+        # the frustum edge don't pop — they may be partially visible.
+        _cull_cam     = _frame_cam          # None = no culling (no camera in scene)
+        _OUTSIDE      = KX_Camera.OUTSIDE   # integer constant — compare without string alloc
 
         # Drag over lifetime locals
         drag_start   = self._drag_start
@@ -4205,6 +4458,10 @@ class ParticleSystem:
                         distance     # max ray length (one frame of travel)
                     )
                     if hit_obj:
+                        # OBJECT mode: ignore hits on anything except the chosen target
+                        if coll_mode == 'OBJECT' and hit_obj.name != coll_obj_name:
+                            hit_obj = None
+                    if hit_obj:
                         if stop_on_collision:
                             p.is_stopped = True
                             p.velocity.x = 0.0; p.velocity.y = 0.0; p.velocity.z = 0.0
@@ -4229,6 +4486,17 @@ class ParticleSystem:
             obj = p.obj
             if obj:
                 obj.worldPosition = p.position
+
+                # Frustum culling — hide particles outside the camera view so the
+                # rasterizer skips them entirely. Uses a sphere test with a generous
+                # radius (size * 2) to avoid edge popping.
+                if _cull_cam:
+                    in_view = _cull_cam.sphereInsideFrustum(p.position, p.size * 2.0) != _OUTSIDE
+                    if obj.visible != in_view:
+                        obj.visible = in_view
+                    if not in_view:
+                        continue   # skip all further writes for this particle
+
                 # Trail: record current position, keep only last trail_segments entries
                 if trail_enabled:
                     tp = p.trail_positions
@@ -4247,7 +4515,21 @@ class ParticleSystem:
                 else:
                     s = size_start + size_delta * life_ratio
                 p.size = s
-                obj.worldScale = [s, s, s]
+                # Hide fully-transparent particles — zero alpha still costs a rasterizer
+                # pass for depth sorting. Hiding skips the draw call entirely.
+                if enable_alpha and s > 0.0001:
+                    # Quick alpha estimate without full curve eval — use life_ratio
+                    _quick_a = start_alpha + (end_alpha - start_alpha) * min(1.0, max(0.0,
+                        (life_ratio - alpha_t_start) / max(alpha_t_end - alpha_t_start, 0.0001)))
+                    if _quick_a < 0.01 and obj.visible:
+                        obj.visible = False
+                        continue
+                    elif not obj.visible:
+                        obj.visible = True
+                # Stopped particles don't move or change size — skip transform writes
+                # but still update color/alpha if enabled.
+                if not p.is_stopped:
+                    obj.worldScale = [s, s, s]
 
                 # Color & alpha — only write obj.color if at least one feature is on,
                 # avoiding an unnecessary per-particle dict write when both are disabled.
@@ -4469,10 +4751,18 @@ init()
 
         # Property Creation - only adds missing props
         def ensure_prop(name, type, value):
-            if name not in init_obj.game.properties:
-                bpy.ops.object.game_property_new(type=type, name=name)
-                init_obj.game.properties[name].value = value
-                added.append(f"prop:{name}")
+            if name in init_obj.game.properties:
+                existing = init_obj.game.properties[name]
+                if existing.type == type:
+                    return  # exists with correct type — leave it alone
+                # Wrong type — remove and fall through to recreate
+                for i, p in enumerate(init_obj.game.properties):
+                    if p.name == name:
+                        bpy.ops.object.game_property_remove(index=i)
+                        break
+            bpy.ops.object.game_property_new(type=type, name=name)
+            init_obj.game.properties[name].value = value
+            added.append(f"prop:{name}")
 
         props = init_obj.particle_system_props
 
@@ -4520,9 +4810,11 @@ init()
         ensure_prop('ps_follow_object',  'STRING', props.follow_object.name if props.follow_object else ' ')
 
         # Collision properties
-        ensure_prop('ps_enable_collision',  'BOOL',  props.enable_collision)
-        ensure_prop('ps_bounce_strength',   'FLOAT', props.bounce_strength)
-        ensure_prop('ps_stop_on_collision', 'BOOL',  props.stop_on_collision)
+        ensure_prop('ps_enable_collision',  'BOOL',   props.enable_collision)
+        ensure_prop('ps_collision_mode',    'STRING', props.collision_mode)
+        ensure_prop('ps_collision_object',  'STRING', props.collision_object.name if props.collision_object else ' ')
+        ensure_prop('ps_bounce_strength',   'FLOAT',  props.bounce_strength)
+        ensure_prop('ps_stop_on_collision', 'BOOL',   props.stop_on_collision)
 
         # Movement type
         ensure_prop('ps_movement_type', 'STRING', props.movement_type)
@@ -4627,9 +4919,13 @@ init()
         ensure_prop('ps_lod3_destroy',    'BOOL',  props.lod3_destroy_particles)
 
         # System Launcher
-        ensure_prop('ps_launcher_enabled', 'BOOL',  props.enable_launcher)
-        ensure_prop('ps_launcher_dist',    'FLOAT', props.launcher_distance)
-        ensure_prop('ps_launcher_prewarm', 'FLOAT', props.launcher_prewarm_distance)
+        ensure_prop('ps_launcher_enabled', 'BOOL',   props.enable_launcher)
+        ensure_prop('ps_launcher_dist',    'FLOAT',  props.launcher_distance)
+        ensure_prop('ps_launcher_prewarm', 'FLOAT',  props.launcher_prewarm_distance)
+        ensure_prop('ps_pool_chunk_size',  'INT',   props.pool_chunk_size)
+        ensure_prop('ps_sim_speed',        'FLOAT', props.simulation_speed)
+        ensure_prop('ps_emission_mesh_object', 'STRING', props.emission_mesh_object.name if props.emission_mesh_object else ' ')
+        ensure_prop('ps_emission_mesh_mode',   'STRING', props.emission_mesh_mode)
 
         # Orbit
         ensure_prop('ps_orbit_center',        'STRING', props.orbit_center)
