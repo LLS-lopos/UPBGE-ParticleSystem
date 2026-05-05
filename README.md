@@ -28,7 +28,7 @@ It's an addon design for UPBGE 0.5+ to create particle effects for your game wit
 8. Press P and enjoy!
 
 > [!TIP]
-You can control the particle spawning with *Logic Brick* or *Logic nodes* by using **ps_tigger** bool property
+You can control the particle spawning with *Logic Brick* or *Logic nodes* by using **ps_trigger** bool property
 
 > [!WARNING]
 The performance can be an issue since the Add-on uses CPU in complex effects, but to optimize and deliver the best performance, follow these steps:
