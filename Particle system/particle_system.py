@@ -1,7 +1,7 @@
 bl_info = {
     "name": "UPBGE Particle System",
     "author": "Ghost DEV",
-    "version": (0, 8, 1),
+    "version": (0, 9, 0),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
     "description": "Addon creates a particle system for game engine",
@@ -14,7 +14,11 @@ import bpy
 import bmesh
 import math
 import time
+import json
+import os
+import base64
 from mathutils import Vector, Matrix
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 import random
 
 # Wire shape visualization
@@ -289,7 +293,6 @@ _PROPS_MAP = (
     ('enable_collision',                    'ps_enable_collision'),
     ('collision_mode',                      'ps_collision_mode'),
     ('bounce_strength',                    'ps_bounce_strength'),
-    ('stop_on_collision',                  'ps_stop_on_collision'),
     ('particle_type',                    'ps_particle_type'),
     ('start_alpha',                    'ps_start_alpha'),
     ('end_alpha',                    'ps_end_alpha'),
@@ -387,6 +390,29 @@ def update_base_color(self, context):
             return  # found and updated, done
 
 
+def update_material(self, context):
+    """Rebuild the particle material whenever a material-affecting property changes.
+    Only runs if the material has already been built (Apply Material was run at least once),
+    so it never creates a material unexpectedly on a fresh emitter."""
+    obj = context.object
+    if not obj:
+        return
+    ps = obj.particle_system_props
+    # Determine which material to rebuild
+    if ps.particle_type == 'BILLBOARD':
+        mat_name = f"PS_BillboardMat_{obj.name}"
+    else:
+        mat_name = f"PS_Mat_{obj.name}"
+    mat = bpy.data.materials.get(mat_name)
+    if mat is None:
+        return  # material not built yet — nothing to rebuild
+    # _build_nodes is a static method on PARTICLE_OT_apply_material.
+    # We look it up at call time to avoid a forward-reference at module level.
+    apply_op = bpy.types.Operator.bl_rna_get_subclass_py('particle.apply_material')
+    if apply_op is not None:
+        apply_op._build_nodes(mat, ps)
+    update_game_prop(self, context)
+
 def update_game_prop(self, context):
     obj = context.object
     if not obj: return
@@ -475,6 +501,72 @@ def _get_curve_node(obj_name, label):
         if node.bl_idname == 'ShaderNodeRGBCurve' and node.label == label:
             return node
     return None
+
+# ── Preset serialization helpers ──────────────────────────────────────────────
+# Properties skipped during export (runtime state, not user settings)
+_SKIP_PROPS = {'preview_active', 'rna_type'}
+
+def _serialize_props(ps):
+    """Serialize all ParticleSystemProperties fields to a plain dict."""
+    data = {}
+    rna = ps.bl_rna
+    for prop_name, prop in rna.properties.items():
+        if prop_name in _SKIP_PROPS:
+            continue
+        if prop.is_readonly:
+            continue
+        val = getattr(ps, prop_name)
+        # FloatVectorProperty — store as list
+        if hasattr(val, '__len__') and not isinstance(val, str):
+            try:
+                data[prop_name] = list(val)
+            except Exception:
+                data[prop_name] = None
+        # PointerProperty — any Blender ID type (Object, Image, Material, etc.)
+        # Just store the name; on import we look it up in the right bpy.data collection
+        elif hasattr(val, 'name') and hasattr(val, 'bl_rna'):
+            data[prop_name] = val.name
+        # None pointer
+        elif val is None and prop.type == 'POINTER':
+            data[prop_name] = ''
+        else:
+            data[prop_name] = val
+    return data
+
+def _deserialize_props(ps, data):
+    """Apply a serialized dict back to ParticleSystemProperties (full replace)."""
+    rna = ps.bl_rna
+    for prop_name, val in data.items():
+        if prop_name in _SKIP_PROPS:
+            continue
+        if prop_name not in rna.properties:
+            continue
+        prop = rna.properties[prop_name]
+        if prop.is_readonly:
+            continue
+        try:
+            existing = getattr(ps, prop_name)
+            # FloatVectorProperty — assign element-by-element
+            if hasattr(existing, '__len__') and not isinstance(existing, str):
+                if val is not None:
+                    for i, v in enumerate(val):
+                        existing[i] = v
+            # PointerProperty — look up in the correct bpy.data collection by type name
+            elif prop.type == 'POINTER':
+                if not val:
+                    setattr(ps, prop_name, None)
+                else:
+                    fixed_type = prop.fixed_type.identifier if hasattr(prop, 'fixed_type') else ''
+                    if fixed_type == 'Image':
+                        setattr(ps, prop_name, bpy.data.images.get(val))
+                    elif fixed_type == 'Material':
+                        setattr(ps, prop_name, bpy.data.materials.get(val))
+                    else:  # Object and everything else
+                        setattr(ps, prop_name, bpy.data.objects.get(val))
+            else:
+                setattr(ps, prop_name, val)
+        except Exception as e:
+            print(f"Preset import: could not set '{prop_name}': {e}")
 
 def _ensure_curve_mat(obj):
     mat_name = CURVE_MAT_PREFIX + obj.name
@@ -790,6 +882,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             ('CURVE',  "Curve",  "Size shaped by a custom curve — hit Apply Material to bake"),
         ],
         default='SIMPLE',
+        update=update_material,
     )
 
     start_velocity: bpy.props.FloatVectorProperty(name="Start Velocity", default=(0.0, 0.0, 2.0), size=3, update=update_game_prop)
@@ -1064,13 +1157,14 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             "Apply textures to the particle"
         ),
         default=False,
-        update=update_game_prop
+        update=update_material
     )
 
     billboard_texture: bpy.props.PointerProperty(
         name="Texture",
         type=bpy.types.Image,
         description="Image to apply to the billboard material",
+        update=update_material,
     )
 
     blend_mode: bpy.props.EnumProperty(
@@ -1087,6 +1181,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             ('ADDITIVE',    "Additive",    "Adds particle light on top of the scene — fire, sparks, glows"),
         ],
         default='ALPHA_BLEND',
+        update=update_material,
     )
 
     material_type: bpy.props.EnumProperty(
@@ -1099,6 +1194,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             ('BSDF',     "BSDF",     "Principled BSDF — lit by scene lights, casts and receives light normally"),
         ],
         default='EMISSION',
+        update=update_material,
     )
 
     emission_strength: bpy.props.FloatProperty(
@@ -1108,7 +1204,8 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         ),
         default=1.0,
         min=0.0,
-        max=1000.0
+        max=1000.0,
+        update=update_material,
     )
 
     # Collision Properties
@@ -1145,12 +1242,6 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
-    stop_on_collision: bpy.props.BoolProperty(
-        name="Stop Movement",
-        description="Freeze particle in place when it hits a surface (only active when Bounce is 0)",
-        default=False,
-        update=update_game_prop
-    )
 
     # Rotation Property (XYZ like velocity)
     rotation: bpy.props.FloatVectorProperty(
@@ -1168,7 +1259,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Color over Lifetime",
         description="Enable color interpolation over the particle's lifetime",
         default=False,
-        update=update_game_prop
+        update=update_material
     )
 
     # Flat base color — used when Color over Lifetime is off.
@@ -1229,6 +1320,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             ('RAMP',   "Ramp",   "Multiple color stops over lifetime — hit Apply Material to bake"),
         ],
         default='SIMPLE',
+        update=update_material,
     )
 
     # Alpha over lifetime
@@ -1236,7 +1328,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         name="Alpha over Lifetime",
         description="Enable alpha fade over the particle's lifetime",
         default=False,
-        update=update_game_prop
+        update=update_material
     )
 
     start_alpha: bpy.props.FloatProperty(
@@ -1272,6 +1364,7 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
             ('CURVE',  "Curve",  "Fade shaped by a custom curve — hit Apply Material to bake"),
         ],
         default='SIMPLE',
+        update=update_material,
     )
 
     # Turbulence
@@ -1636,6 +1729,11 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
         clean_row.operator("particle.remove_script", text="Remove Script", icon='SCRIPT')
         clean_row.operator("particle.remove_props",  text="Remove Props",  icon='TRASH')
 
+        # Preset row — export/import particle effect (.pse)
+        preset_row = box.row(align=True)
+        preset_row.operator("particle.export_preset", text="Export Effect", icon='EXPORT')
+        preset_row.operator("particle.import_preset", text="Import Effect", icon='IMPORT')
+
         layout.separator()
         layout.prop(ps, "enabled", text="Particle Emitter")
         #Trigger
@@ -1929,8 +2027,6 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                     if ps.collision_object is None:
                         box.label(text="Pick an object to collide with", icon='INFO')
                 box.prop(ps, "bounce_strength")
-                if ps.bounce_strength == 0.0:
-                    box.prop(ps, "stop_on_collision", text="Stop Movement")
 
             # Turbulence section
             box.separator()
@@ -2254,12 +2350,8 @@ class PARTICLE_OT_preview_toggle(bpy.types.Operator):
                 if enable_coll:
                     next_pos = particle_obj.location + velocity * dt
                     if next_pos.z < 0:
-                        if ps.stop_on_collision:
-                            velocity.x = velocity.y = velocity.z = 0.0
-                            next_pos.z = 0.0
-                        else:
-                            velocity.z = -velocity.z * bounce
-                            next_pos.z = 0.01
+                        velocity.z = -velocity.z * bounce
+                        next_pos.z = 0.01
                     particle_obj.location = next_pos
                 else:
                     particle_obj.location += velocity * dt
@@ -2815,7 +2907,6 @@ class Particle:
                  'orbit_angle', 'orbit_speed', 'orbit_radius',
                  'orbit_center', 'orbit_basis_u', 'orbit_basis_v',
                  'roll_angle', 'roll_speed',
-                 'is_stopped',
                  'trail_positions')  # list of (time, Vector) — ring buffer for trail
     def __init__(self):
         self.position        = Vector((0.0, 0.0, 0.0))
@@ -2837,7 +2928,6 @@ class Particle:
         self.orbit_basis_v   = Vector((0.0, 1.0, 0.0))
         self.roll_angle      = 0.0
         self.roll_speed      = 0.0
-        self.is_stopped      = False
         self.trail_positions = []   # list of [timestamp, x, y, z] — plain lists, no Vector alloc
 class ParticleSystem:
     __slots__ = (
@@ -2852,7 +2942,7 @@ class ParticleSystem:
         '_start_velocity', '_velocity_random', '_emission_shape',
         '_size_start', '_size_delta', '_size_max', '_size_curve',
         '_drag_start', '_drag_end', '_resistance',
-        '_enable_collision', '_bounce', '_stop_on_collision',
+        '_enable_collision', '_bounce',
         '_collision_mode', '_collision_object_name',
         '_enable_color', '_color_start', '_color_end', '_color_curve', '_color_ramp',
         '_color_t_start', '_color_t_end',
@@ -2933,7 +3023,6 @@ class ParticleSystem:
         self._resistance      = 1.0
         self._enable_collision  = False
         self._bounce            = 0.5
-        self._stop_on_collision = False
         self._collision_mode         = 'ALL'
         self._collision_object_name  = ''
         self._props_raw       = ()   # Dirty-flag cache: last known raw prop tuple
@@ -3056,7 +3145,7 @@ class ParticleSystem:
             g('ps_resistance',           1.0),   # 38
             g('ps_enable_collision',    False),  # 39
             g('ps_bounce_strength',     0.5),    # 40
-            g('ps_stop_on_collision',   False),  # 41
+            g('ps_stop_on_collision',   False),  # 41  (legacy — kept so old .blend files don't break)
             g('ps_rotation_x',          0.0),    # 42
             g('ps_rotation_y',          0.0),    # 43
             g('ps_rotation_z',          0.0),    # 44
@@ -3208,7 +3297,6 @@ class ParticleSystem:
             'resistance':             r[38],
             'enable_collision':       r[39],
             'bounce_strength':        r[40],
-            'stop_on_collision':      r[41],
             'collision_mode':         r[142],
             'collision_object':       r[143],
             'pool_chunk_size':        r[144],
@@ -3351,7 +3439,6 @@ class ParticleSystem:
         self._size_max   = p.get('max_size', p['start_size'])  # Curve mode max
         self._enable_collision  = p['enable_collision']
         self._bounce            = p['bounce_strength']
-        self._stop_on_collision = p['stop_on_collision']
         self._collision_mode         = str(p.get('collision_mode', 'ALL'))
         self._collision_object_name  = str(p.get('collision_object', ' ')).strip()
 
@@ -3778,7 +3865,6 @@ class ParticleSystem:
         death_vel = p.velocity.copy() if (self._sub_emitter_enabled and self._sub_emitter_inherit_vel) else None
 
         p.is_active  = False
-        p.is_stopped = False
         if p.obj:
             p.obj.worldScale = [0.0, 0.0, 0.0]
             p.obj.visible = False
@@ -3979,7 +4065,6 @@ class ParticleSystem:
         p.rotation.x = 0.0; p.rotation.y = 0.0; p.rotation.z = 0.0
         p.angular_velocity.x = 0.0; p.angular_velocity.y = 0.0; p.angular_velocity.z = 0.0
         p.roll_angle = 0.0
-        p.is_stopped = False
         p.roll_speed = (self._bb_roll_speed
                         + (_random() - 0.5) * 2.0 * self._bb_roll_random) * 2.0 * _pi
         p.is_active = True
@@ -4297,7 +4382,6 @@ class ParticleSystem:
         is_force         = self._is_force
         enable_collision  = self._enable_collision and not lod_no_coll
         bounce            = self._bounce
-        stop_on_collision = self._stop_on_collision
         coll_mode         = self._collision_mode
         coll_obj_name     = self._collision_object_name
         size_start       = self._size_start
@@ -4390,16 +4474,15 @@ class ParticleSystem:
             # Apply acceleration (gravity + optional force).
             # For orbit mode we skip this — orbit overwrites position directly.
             # Gravity drift along the free axis is handled inside the orbit branch.
-            if not p.is_stopped:
-                if not is_orbit:
-                    p.velocity += acc
+            if not is_orbit:
+                p.velocity += acc
 
-                # Drag over lifetime — interpolates Start→End across particle age
-                if drag_active:
-                    life_r = p.age / p.lifetime
-                    p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
+            # Drag over lifetime — interpolates Start→End across particle age
+            if drag_active:
+                life_r = p.age / p.lifetime
+                p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
 
-                # Turbulence — sample noise at particle world position
+            # Turbulence — sample noise at particle world position
                 if turb_enabled:
                     px = p.position.x * turb_freq
                     py = p.position.y * turb_freq
@@ -4416,7 +4499,7 @@ class ParticleSystem:
             # Position integration — orbit mode drives position directly from
             # angle+radius in the precomputed orbit plane (basis U/V vectors).
             # Non-orbit uses standard velocity integration.
-            if is_orbit and not p.is_stopped:
+            if is_orbit:
                 p.orbit_angle += p.orbit_speed * orbit_two_pi * dt
                 a  = p.orbit_angle
                 ca = _cos(a); sa = _sin(a)
@@ -4462,16 +4545,11 @@ class ParticleSystem:
                         if coll_mode == 'OBJECT' and hit_obj.name != coll_obj_name:
                             hit_obj = None
                     if hit_obj:
-                        if stop_on_collision:
-                            p.is_stopped = True
-                            p.velocity.x = 0.0; p.velocity.y = 0.0; p.velocity.z = 0.0
-                            p.position = hit_pos + hit_normal * 0.005
-                        else:
-                            dot = p.velocity.dot(hit_normal)
-                            p.velocity -= 2.0 * dot * hit_normal
-                            p.velocity *= bounce
-                            # Push off surface to prevent sinking
-                            p.position = hit_pos + hit_normal * 0.02
+                        dot = p.velocity.dot(hit_normal)
+                        p.velocity -= 2.0 * dot * hit_normal
+                        p.velocity *= bounce
+                        # Push off surface to prevent sinking
+                        p.position = hit_pos + hit_normal * 0.02
                         # Sub-emitter On Collision
                         if sub_coll_enabled and sub_coll_name:
                             try:
@@ -4526,10 +4604,7 @@ class ParticleSystem:
                         continue
                     elif not obj.visible:
                         obj.visible = True
-                # Stopped particles don't move or change size — skip transform writes
-                # but still update color/alpha if enabled.
-                if not p.is_stopped:
-                    obj.worldScale = [s, s, s]
+                obj.worldScale = [s, s, s]
 
                 # Color & alpha — only write obj.color if at least one feature is on,
                 # avoiding an unnecessary per-particle dict write when both are disabled.
@@ -4814,7 +4889,6 @@ init()
         ensure_prop('ps_collision_mode',    'STRING', props.collision_mode)
         ensure_prop('ps_collision_object',  'STRING', props.collision_object.name if props.collision_object else ' ')
         ensure_prop('ps_bounce_strength',   'FLOAT',  props.bounce_strength)
-        ensure_prop('ps_stop_on_collision', 'BOOL',   props.stop_on_collision)
 
         # Movement type
         ensure_prop('ps_movement_type', 'STRING', props.movement_type)
@@ -5259,6 +5333,278 @@ class PARTICLE_OT_remove_props(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ── .pse helpers ──────────────────────────────────────────────────────────────
+
+def _image_to_b64(image):
+    """Pack an Image to PNG bytes and return as a base64 string.
+    Returns None if the image can't be packed."""
+    try:
+        import tempfile
+        # Save image to a temp file as PNG then read bytes
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        tmp.close()
+        image.save_render(tmp.name)
+        with open(tmp.name, 'rb') as f:
+            data = f.read()
+        os.unlink(tmp.name)
+        return base64.b64encode(data).decode('ascii')
+    except Exception as e:
+        print(f"PSE: could not embed image '{image.name}': {e}")
+        return None
+
+def _b64_to_image(name, b64_str):
+    """Decode a base64 PNG string and create a Blender Image from it.
+    Returns the Image or None on failure."""
+    try:
+        import tempfile
+        raw = base64.b64decode(b64_str)
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        tmp.write(raw)
+        tmp.close()
+        # Check if image with same name already exists — reuse it
+        existing = bpy.data.images.get(name)
+        if existing:
+            return existing
+        img = bpy.data.images.load(tmp.name)
+        img.name = name
+        img.pack()            # pack into .blend so tmp file can be deleted
+        img.filepath = ''
+        os.unlink(tmp.name)
+        return img
+    except Exception as e:
+        print(f"PSE: could not restore image '{name}': {e}")
+        return None
+
+def _collect_emitter_tree(root):
+    """Return root + all child objects that are particle emitters,
+    recursively. Order: root first, then children depth-first."""
+    result = []
+    def _walk(obj):
+        if hasattr(obj, 'particle_system_props') and obj.particle_system_props.enabled:
+            result.append(obj)
+        for child in obj.children:
+            _walk(child)
+    _walk(root)
+    # Also include root even if it isn't initialized yet (partial setup)
+    if root not in result:
+        result.insert(0, root)
+    return result
+
+def _serialize_emitter(obj, root, id_map):
+    """Serialize one emitter to a dict.
+    id_map: {object_name: stable_id} built before calling this."""
+    ps   = obj.particle_system_props
+    data = _serialize_props(ps)
+
+    # Remap sub-emitter name fields to stable IDs so they reconnect on import
+    for field in ('sub_emitter_object', 'sub_emitter_birth_object',
+                  'sub_emitter_collision_object', 'follow_object',
+                  'collision_object', 'emission_mesh_object'):
+        ptr = getattr(ps, field, None)
+        if ptr and ptr.name in id_map:
+            data[field] = '__id__:' + id_map[ptr.name]
+
+    # Embed texture as Base64 if assigned
+    tex_b64  = None
+    tex_name = None
+    tex_obj  = getattr(ps, 'billboard_texture', None)
+    if tex_obj:
+        tex_name = tex_obj.name
+        tex_b64  = _image_to_b64(tex_obj)
+
+    # World-space transform — imported with correct positions regardless of root transform
+    world_loc = list(obj.matrix_world.translation)
+    world_rot = list(obj.matrix_world.to_euler())
+    world_sca = list(obj.matrix_world.to_scale())
+
+    return {
+        'id':          id_map[obj.name],
+        'name':        obj.name,
+        'world_loc':   world_loc,
+        'world_rot':   world_rot,
+        'world_scale': world_sca,
+        'is_root':     obj is root,
+        'parent_id':   id_map.get(obj.parent.name) if obj.parent and obj.parent.name in id_map else None,
+        'properties':  data,
+        'texture_name': tex_name,
+        'texture_b64':  tex_b64,
+    }
+
+def _export_pse(root, filepath):
+    """Build and write a .pse file from root emitter and its children."""
+    emitters = _collect_emitter_tree(root)
+    # Build stable ID map: object name -> 'emitter_N'
+    id_map = {obj.name: f'emitter_{i}' for i, obj in enumerate(emitters)}
+
+    serialized = [_serialize_emitter(obj, root, id_map) for obj in emitters]
+
+    pse = {
+        '_pse_version':  list(bl_info['version']),
+        '_effect_name':  root.name,
+        '_emitter_count': len(serialized),
+        'emitters':      serialized,
+    }
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(pse, f, indent=2)
+    return len(serialized)
+
+def _import_pse(filepath, context):
+    """Read a .pse file and recreate all emitters in the scene.
+    Returns (root_obj, count, warnings)."""
+    with open(filepath, 'r', encoding='utf-8') as f:
+        pse = json.load(f)
+
+    if 'emitters' not in pse:
+        raise ValueError("Not a valid .pse file")
+
+    emitter_list = pse['emitters']
+    warnings     = []
+    id_to_obj    = {}   # stable_id -> created bpy.types.Object
+
+    # Pass 1 — create all emitter objects at world-space positions and apply properties
+    for entry in emitter_list:
+        stable_id = entry['id']
+
+        # Support both new world_loc format and legacy rel_loc format
+        loc = entry.get('world_loc') or entry.get('rel_loc') or [0.0, 0.0, 0.0]
+
+        bpy.ops.object.empty_add(type='PLAIN_AXES', location=loc)
+        obj      = context.active_object
+        obj.name = entry.get('name', stable_id)
+
+        # Restore rotation and scale from world transform (new format) or legacy
+        rot = entry.get('world_rot') or entry.get('rel_rot') or [0.0, 0.0, 0.0]
+        sca = entry.get('world_scale') or entry.get('rel_scale') or [1.0, 1.0, 1.0]
+        obj.rotation_euler = rot
+        obj.scale          = sca
+
+        # Restore texture from Base64 if present
+        tex_b64  = entry.get('texture_b64')
+        tex_name = entry.get('texture_name')
+        tex_obj  = None
+        if tex_b64 and tex_name:
+            tex_obj = _b64_to_image(tex_name, tex_b64)
+            if tex_obj is None:
+                warnings.append(f"Could not restore texture '{tex_name}' for '{obj.name}'")
+
+        # Apply particle system properties
+        ps = obj.particle_system_props
+        _deserialize_props(ps, entry.get('properties', {}))
+        if tex_obj:
+            ps.billboard_texture = tex_obj
+
+        id_to_obj[stable_id] = obj
+
+    # Pass 2 — restore parenting while keeping world-space positions intact.
+    # We set parent and immediately correct matrix_parent_inverse so the object
+    # does not jump — this is the standard Blender "keep transform" pattern.
+    for entry in emitter_list:
+        obj       = id_to_obj.get(entry['id'])
+        parent_id = entry.get('parent_id')
+        if obj and parent_id and parent_id in id_to_obj:
+            parent = id_to_obj[parent_id]
+            # Capture current world matrix before parenting changes it
+            world_mat = obj.matrix_world.copy()
+            obj.parent = parent
+            # Restore world position: matrix_parent_inverse offsets the local
+            # matrix so that parent @ matrix_parent_inverse @ local == world_mat
+            obj.matrix_parent_inverse = parent.matrix_world.inverted()
+            obj.matrix_world = world_mat
+
+    # Pass 3 — reconnect sub-emitter name references
+    for entry in emitter_list:
+        obj  = id_to_obj.get(entry['id'])
+        if not obj:
+            continue
+        ps   = obj.particle_system_props
+        props_data = entry.get('properties', {})
+        for field in ('sub_emitter_object', 'sub_emitter_birth_object',
+                      'sub_emitter_collision_object', 'follow_object',
+                      'collision_object', 'emission_mesh_object'):
+            val = props_data.get(field, '')
+            if isinstance(val, str) and val.startswith('__id__:'):
+                ref_id  = val[len('__id__:'):]
+                ref_obj = id_to_obj.get(ref_id)
+                if ref_obj:
+                    try:
+                        setattr(ps, field, ref_obj)
+                    except Exception:
+                        pass
+
+    # Pass 4 — auto-initialize logic bricks and game properties for every emitter.
+    # This saves users from having to manually click Initialize on each object.
+    # bpy.types.Operator subclasses cannot be instantiated directly — always call
+    # them through bpy.ops so Blender's operator context is set up correctly.
+    for entry in emitter_list:
+        obj = id_to_obj.get(entry['id'])
+        if obj is None:
+            continue
+        # Make this object the active selection so setup_logic targets it
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        try:
+            bpy.ops.particle.setup_logic()
+        except Exception as e:
+            warnings.append(f"Auto-init failed for '{obj.name}': {e}")
+
+    root_obj = id_to_obj.get(emitter_list[0]['id']) if emitter_list else None
+    return root_obj, len(emitter_list), warnings
+
+
+class PARTICLE_OT_export_preset(bpy.types.Operator, ExportHelper):
+    """Export particle effect to a self-contained .pse file.
+    Includes all child emitters, textures (Base64 embedded), and sub-emitter links."""
+    bl_idname  = "particle.export_preset"
+    bl_label   = "Export Effect (.pse)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".pse"
+    filter_glob: bpy.props.StringProperty(default="*.pse", options={'HIDDEN'})
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object selected")
+            return {'CANCELLED'}
+
+        try:
+            count = _export_pse(obj, self.filepath)
+            name  = os.path.basename(self.filepath)
+            self.report({'INFO'}, f"Exported '{name}' — {count} emitter(s)")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Export failed: {e}")
+            return {'CANCELLED'}
+
+
+class PARTICLE_OT_import_preset(bpy.types.Operator, ImportHelper):
+    """Import a .pse particle effect file — recreates all emitters with correct
+    parenting, relative positions, sub-emitter links and embedded textures."""
+    bl_idname  = "particle.import_preset"
+    bl_label   = "Import Effect (.pse)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".pse"
+    filter_glob: bpy.props.StringProperty(default="*.pse", options={'HIDDEN'})
+
+    def execute(self, context):
+        try:
+            root_obj, count, warnings = _import_pse(self.filepath, context)
+        except Exception as e:
+            self.report({'ERROR'}, f"Import failed: {e}")
+            return {'CANCELLED'}
+
+        name = os.path.basename(self.filepath)
+        msg  = f"Imported '{name}' — {count} emitter(s)"
+        if warnings:
+            msg += f" ({len(warnings)} warning(s) — see console)"
+            for w in warnings:
+                print(f"PSE import warning: {w}")
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 _WIRE_PREFIXES = (
     "PS_Wire_Box_",
     "PS_Wire_Sphere_",
@@ -5305,6 +5651,8 @@ classes = (
     PARTICLE_OT_init_color_ramp,
     PARTICLE_OT_remove_script,
     PARTICLE_OT_remove_props,
+    PARTICLE_OT_export_preset,
+    PARTICLE_OT_import_preset,
 )
 
 def register():
