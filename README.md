@@ -2,7 +2,7 @@
 It's an addon design for UPBGE 0.5+ to create particle effects for your game without doing it from scratch, and it creates with the help of AI
 ## Features
 + Integrated directly into **The physics properties** for easy access
-+ Two emission modes **continuous** and **burst**
++ Two emission modes **Continuous**, **Burst** and **Rate Over Time**
 + Customization settings to create wide style options
 + Billboard or mesh can be a particle allowing for total creative freedom
 + Controlling the system with an emission trigger for smart use by toggle **ps_tigger** bool property
