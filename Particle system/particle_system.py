@@ -1,7 +1,7 @@
 bl_info = {
     "name": "UPBGE Particle System",
     "author": "Ghost DEV",
-    "version": (0, 9, 0),
+    "version": (0, 9, 1),
     "blender": (5, 0, 0),
     "location": "Properties > Physics Properties",
     "description": "Addon creates a particle system for game engine",
@@ -307,6 +307,9 @@ _PROPS_MAP = (
     ('turbulence_frequency',                    'ps_turb_frequency'),
     ('turbulence_speed',                    'ps_turb_speed'),
     ('turbulence_seed',                       'ps_turb_seed'),
+    ('turbulence_influence',                  'ps_turb_influence'),
+    ('turbulence_rotation_strength',          'ps_turb_rot_strength'),
+    ('turbulence_scale_strength',             'ps_turb_scale_strength'),
     ('enable_lod',                    'ps_enable_lod'),
     ('lod_start_distance',                    'ps_lod_start'),
     ('lod1_distance',                    'ps_lod1_dist'),
@@ -573,20 +576,28 @@ def _ensure_curve_mat(obj):
     mat = bpy.data.materials.get(mat_name)
     if mat is None:
         mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+    # Fake user prevents Blender's GC from purging the material on save/reload.
+    # The material is never assigned to a mesh so without this flag all curve
+    # data (color, alpha, size, velocity, force curves) would be lost on reopen.
     mat.use_fake_user = True
-    mat.use_nodes     = True
     return mat
 
-def _make_curve_node(mat, label):
-    """Create a ShaderNodeRGBCurve with default diagonal and AUTO_CLAMPED handles."""
+def _make_curve_node(mat, label, signed=False):
+    """Create a ShaderNodeRGBCurve with default diagonal and AUTO_CLAMPED handles.
+    signed=True: Y range is -1..2 so the curve can go negative (direction reversal).
+    signed=False (default): Y range is 0..1, used for color/alpha/size curves."""
     node       = mat.node_tree.nodes.new('ShaderNodeRGBCurve')
     node.label = label
     mapping    = node.mapping
-    mapping.use_clip   = True
-    mapping.clip_min_x = 0.0; mapping.clip_max_x = 1.0
-    mapping.clip_min_y = 0.0; mapping.clip_max_y = 1.0
+    if signed:
+        mapping.use_clip   = False   # disable clipping entirely so user can go freely negative
+    else:
+        mapping.use_clip   = True
+        mapping.clip_min_x = 0.0; mapping.clip_max_x = 1.0
+        mapping.clip_min_y = 0.0; mapping.clip_max_y = 1.0
     for curve in mapping.curves:
-        curve.points[0].location    = (0.0, 0.0)
+        curve.points[0].location    = (0.0, 1.0 if signed else 0.0)
         curve.points[0].handle_type = 'AUTO_CLAMPED'
         curve.points[1].location    = (1.0, 1.0)
         curve.points[1].handle_type = 'AUTO_CLAMPED'
@@ -606,13 +617,40 @@ def _sample_curve_node(node, n=16):
         return identity
 
 # ── Public accessors ─────────────────────────────────────────────────────────
-def get_color_curve_node(obj_name): return _get_curve_node(obj_name, 'ColorCurve')
-def get_alpha_curve_node(obj_name): return _get_curve_node(obj_name, 'AlphaCurve')
-def get_size_curve_node(obj_name):  return _get_curve_node(obj_name, 'SizeCurve')
+def get_color_curve_node(obj_name):    return _get_curve_node(obj_name, 'ColorCurve')
+def get_alpha_curve_node(obj_name):    return _get_curve_node(obj_name, 'AlphaCurve')
+def get_size_curve_node(obj_name):     return _get_curve_node(obj_name, 'SizeCurve')
+def get_velocity_curve_node(obj_name): return _get_curve_node(obj_name, 'VelocityCurve')
+def get_force_curve_node(obj_name):    return _get_curve_node(obj_name, 'ForceCurve')
 
 def sample_color_curve(obj_name, n=16): return _sample_curve_node(get_color_curve_node(obj_name), n)
 def sample_alpha_curve(obj_name, n=64): return _sample_curve_node(get_alpha_curve_node(obj_name), n)
 def sample_size_curve(obj_name, n=16):  return _sample_curve_node(get_size_curve_node(obj_name), n)
+
+def _sample_xyz_curve_node(node, n=16):
+    """Sample the R, G, B channels of a ShaderNodeRGBCurve independently.
+    Returns a pipe-joined string 'x0,x1,...|y0,y1,...|z0,z1,...'
+    where R=X, G=Y, B=Z.  Identity (straight diagonal) returned on error."""
+    identity_ch = ','.join(f'{i/(n-1):.6f}' for i in range(n))
+    identity    = f'{identity_ch}|{identity_ch}|{identity_ch}'
+    if node is None:
+        return identity
+    try:
+        mapping = node.mapping
+        channels = []
+        for ch_idx in range(3):   # 0=R=X, 1=G=Y, 2=B=Z
+            curve = mapping.curves[ch_idx]
+            vals  = [mapping.evaluate(curve, i / (n - 1)) for i in range(n)]
+            channels.append(','.join(f'{v:.6f}' for v in vals))
+        return '|'.join(channels)
+    except Exception:
+        return identity
+
+def sample_velocity_curve(obj_name, n=16):
+    return _sample_xyz_curve_node(get_velocity_curve_node(obj_name), n)
+
+def sample_force_curve(obj_name, n=16):
+    return _sample_xyz_curve_node(get_force_curve_node(obj_name), n)
 
 # ── Color Ramp ────────────────────────────────────────────────────────────────
 def get_color_ramp_node(obj_name):
@@ -658,12 +696,45 @@ def _make_init_operator(bl_idname, bl_label, label_key):
     Op.bl_label    = bl_label
     return Op
 
-PARTICLE_OT_init_color_curve = _make_init_operator(
-    "particle.init_color_curve", "Initialize Color Curve", "ColorCurve")
-PARTICLE_OT_init_alpha_curve = _make_init_operator(
-    "particle.init_alpha_curve", "Initialize Alpha Curve", "AlphaCurve")
-PARTICLE_OT_init_size_curve  = _make_init_operator(
-    "particle.init_size_curve",  "Initialize Size Curve",  "SizeCurve")
+PARTICLE_OT_init_color_curve    = _make_init_operator(
+    "particle.init_color_curve",    "Initialize Color Curve",    "ColorCurve")
+PARTICLE_OT_init_alpha_curve    = _make_init_operator(
+    "particle.init_alpha_curve",    "Initialize Alpha Curve",    "AlphaCurve")
+PARTICLE_OT_init_size_curve     = _make_init_operator(
+    "particle.init_size_curve",     "Initialize Size Curve",     "SizeCurve")
+class PARTICLE_OT_init_velocity_curve(bpy.types.Operator):
+    """Create the VelocityCurve node and subscribe to auto-bake on edit."""
+    bl_idname  = "particle.init_velocity_curve"
+    bl_label   = "Initialize Velocity Curve"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object")
+            return {'CANCELLED'}
+        mat = _ensure_curve_mat(obj)
+        if _get_curve_node(obj.name, 'VelocityCurve') is None:
+            _make_curve_node(mat, 'VelocityCurve', signed=True)
+        _subscribe_xyz_curve(obj, 'VelocityCurve', 'ps_velocity_curve')
+        self.report({'INFO'}, "Velocity Curve initialized")
+        return {'FINISHED'}
+
+class PARTICLE_OT_init_force_curve(bpy.types.Operator):
+    """Create the ForceCurve node and subscribe to auto-bake on edit."""
+    bl_idname  = "particle.init_force_curve"
+    bl_label   = "Initialize Force Curve"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'ERROR'}, "No active object")
+            return {'CANCELLED'}
+        mat = _ensure_curve_mat(obj)
+        if _get_curve_node(obj.name, 'ForceCurve') is None:
+            _make_curve_node(mat, 'ForceCurve', signed=True)
+        _subscribe_xyz_curve(obj, 'ForceCurve', 'ps_force_curve')
+        self.report({'INFO'}, "Force Curve initialized")
+        return {'FINISHED'}
 
 class PARTICLE_OT_init_color_ramp(bpy.types.Operator):
     """Create the Color Ramp node used in RAMP mode."""
@@ -888,6 +959,18 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     start_velocity: bpy.props.FloatVectorProperty(name="Start Velocity", default=(0.0, 0.0, 2.0), size=3, update=update_game_prop)
     velocity_random: bpy.props.FloatProperty(name="Random Velocity", default=0.5, min=0.0, update=update_game_prop)
 
+    velocity_mode: bpy.props.EnumProperty(
+        name="Velocity Mode",
+        description="How the initial velocity is applied over the particle's lifetime",
+        items=[
+            ('CONSTANT',     "Constant",     "Velocity is set at spawn and evolves normally from there"),
+            ('OVER_LIFETIME', "Over Lifetime", "The per-axis curve multiplies the spawn velocity each frame, "
+                                               "giving full XYZ control of how speed changes over lifetime"),
+        ],
+        default='CONSTANT',
+        update=update_game_prop
+    )
+
     enable_gravity: bpy.props.BoolProperty(
         name="Enable Gravity",
         description="Enable gravity along the Z axis",
@@ -982,6 +1065,19 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         description="Applied force (acceleration)",
         default=(0.0, 0.0, 0.0),
         size=3,
+        update=update_game_prop
+    )
+
+    force_mode: bpy.props.EnumProperty(
+        name="Force Mode",
+        description="How the force vector is applied over the particle's lifetime",
+        items=[
+            ('CONSTANT',     "Constant",     "Force is constant for the particle's whole life"),
+            ('OVER_LIFETIME', "Over Lifetime", "The per-axis curve multiplies the force each frame, "
+                                               "giving full XYZ control of how each force component "
+                                               "changes over the particle's lifetime"),
+        ],
+        default='CONSTANT',
         update=update_game_prop
     )
 
@@ -1405,6 +1501,30 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
         update=update_game_prop
     )
 
+    turbulence_influence: bpy.props.FloatProperty(
+        name="Position Amount",
+        description="How much the noise field displaces particle positions each frame — "
+                    "0 leaves movement untouched, 1 applies full turbulence push",
+        default=1.0, min=0.0, max=1.0,
+        update=update_game_prop
+    )
+
+    turbulence_rotation_strength: bpy.props.FloatProperty(
+        name="Rotation Amount",
+        description="How strongly the noise field drives particle angular velocity — "
+                    "0 disables rotational noise entirely",
+        default=0.0, min=0.0, max=100.0,
+        update=update_game_prop
+    )
+
+    turbulence_scale_strength: bpy.props.FloatProperty(
+        name="Size Amount",
+        description="How much the noise field fluctuates particle size each frame — "
+                    "0 disables size noise entirely",
+        default=0.0, min=0.0, max=10.0,
+        update=update_game_prop
+    )
+
     # LOD Properties
     enable_lod: bpy.props.BoolProperty(
         name="Enable LOD",
@@ -1680,7 +1800,98 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
     )
 
 
+
+# ── XYZ curve auto-bake via msgbus ───────────────────────────────────────────
+# When a VelocityCurve or ForceCurve node's mapping is edited, we immediately
+# re-sample and write the result to the game property so Apply Material is not
+# needed after every curve edit.
+
+_xyz_msgbus_owner = object()   # stable owner token — lives for the addon lifetime
+
+def _bake_xyz_curve_to_prop(obj_name, label_key, prop_key):
+    """Re-sample an XYZ curve node and write it to the matching game property."""
+    obj = bpy.data.objects.get(obj_name)
+    if obj is None:
+        return
+    node = _get_curve_node(obj_name, label_key)
+    if node is None:
+        return
+    curve_str = _sample_xyz_curve_node(node, n=16)
+    if prop_key in obj.game.properties:
+        try:
+            obj.game.properties[prop_key].value = curve_str
+        except Exception:
+            pass
+
+def _subscribe_xyz_curve(obj, label_key, prop_key):
+    """Subscribe to CurveMapping changes for the named node on obj.
+    Safe to call multiple times — msgbus deduplicates by (key, owner)."""
+    node = _get_curve_node(obj.name, label_key)
+    if node is None:
+        return
+    try:
+        bpy.msgbus.subscribe_rna(
+            key=node.mapping.path_resolve("curves", False),
+            owner=_xyz_msgbus_owner,
+            args=(obj.name, label_key, prop_key),
+            notify=_bake_xyz_curve_to_prop,
+            options={"PERSISTENT"},
+        )
+    except Exception:
+        # Fallback: subscribe to the whole mapping if path_resolve fails
+        try:
+            bpy.msgbus.subscribe_rna(
+                key=(type(node.mapping), "curves"),
+                owner=_xyz_msgbus_owner,
+                args=(obj.name, label_key, prop_key),
+                notify=_bake_xyz_curve_to_prop,
+                options={"PERSISTENT"},
+            )
+        except Exception:
+            pass
+
+def _resubscribe_all_xyz_curves(scene=None):
+    """Re-subscribe all emitters on file load (msgbus subscriptions don't survive).
+    Also ensures all PS_CurveMat_ materials have use_fake_user so they survive
+    future saves — fixes materials created before this flag was enforced."""
+    for obj in bpy.data.objects:
+        if not hasattr(obj, 'particle_system_props'):
+            continue
+        # Retroactively protect the curve material if it exists
+        mat = bpy.data.materials.get(CURVE_MAT_PREFIX + obj.name)
+        if mat is not None:
+            mat.use_fake_user = True
+        ps = obj.particle_system_props
+        if ps.velocity_mode == 'OVER_LIFETIME':
+            _subscribe_xyz_curve(obj, 'VelocityCurve', 'ps_velocity_curve')
+        if ps.force_mode == 'OVER_LIFETIME':
+            _subscribe_xyz_curve(obj, 'ForceCurve', 'ps_force_curve')
+
 # Particle System Panel
+def _draw_xyz_curve(layout, obj, label_key, init_op_id):
+    # Draw an inline ShaderNodeRGBCurve widget for XYZ Over Lifetime curves.
+    # Creation is done via operator (not here) to avoid draw-context write errors.
+    # R = X axis, G = Y axis, B = Z axis.
+    if obj is None:
+        return
+    node = _get_curve_node(obj.name, label_key)
+    if node is None:
+        # Node not created yet — show a single init button
+        layout.operator(init_op_id, text="Initialize Curve", icon='ADD')
+        return
+    try:
+        layout.template_curve_mapping(node, "mapping", type='COLOR',
+                                      levels=False, brush=False,
+                                      use_negative_slope=False)
+    except Exception:
+        try:
+            layout.template_curve_mapping(node, "mapping")
+        except Exception:
+            layout.label(text="Curve widget unavailable in this build", icon='ERROR')
+            return
+    layout.label(text="R = X     G = Y     B = Z  —  auto-bakes on edit", icon='FCURVE')
+
+
 class PARTICLE_PT_upbge_panel(bpy.types.Panel):
     bl_label = "UPBGE Particle System"
     bl_idname = "PARTICLE_PT_upbge_panel"
@@ -1965,6 +2176,10 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 if not is_bb:
                     box.prop(ps, "rotation")
                 box.prop(ps, "velocity_random")
+                # Velocity curve mode
+                box.prop(ps, "velocity_mode", text="Velocity")
+                if ps.velocity_mode == 'OVER_LIFETIME':
+                    _draw_xyz_curve(box, context.active_object, 'VelocityCurve', 'particle.init_velocity_curve')
                 box.separator()
                 box.prop(ps, "enable_gravity", text="Enable Gravity")
                 if ps.enable_gravity:
@@ -1997,14 +2212,17 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 force_box = box.box()
                 force_box.label(text="Force Settings:", icon='FORCE_DRAG')
                 force_box.prop(ps, "start_velocity", text="Initial Velocity")
+                # Velocity curve mode
+                force_box.prop(ps, "velocity_mode", text="Velocity")
+                if ps.velocity_mode == 'OVER_LIFETIME':
+                    _draw_xyz_curve(force_box, context.active_object, 'VelocityCurve', 'particle.init_velocity_curve')
                 force_box.prop(ps, "force")
+                # Force curve mode
+                force_box.prop(ps, "force_mode", text="Force")
+                if ps.force_mode == 'OVER_LIFETIME':
+                    _draw_xyz_curve(force_box, context.active_object, 'ForceCurve', 'particle.init_force_curve')
                 if not is_bb:
                     force_box.prop(ps, "torque")
-                box.prop(ps, "billboard_roll_enabled", text="Billboard Roll")
-                if ps.billboard_roll_enabled:
-                    roll_row = box.row(align=True)
-                    roll_row.prop(ps, "billboard_roll_speed",  text="Speed")
-                    roll_row.prop(ps, "billboard_roll_random", text="Random")
                 box.prop(ps, "drag_enabled", text="Drag over Lifetime")
                 if ps.drag_enabled:
                     drag_row = box.row(align=True)
@@ -2016,6 +2234,15 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "enable_gravity", text="Enable Gravity")
                 if ps.enable_gravity:
                     box.prop(ps, "gravity_power", text="Gravity Power")
+
+            # Billboard Roll — available for all movement modes, billboard type only
+            if is_bb:
+                box.separator()
+                box.prop(ps, "billboard_roll_enabled", text="Billboard Roll")
+                if ps.billboard_roll_enabled:
+                    roll_row = box.row(align=True)
+                    roll_row.prop(ps, "billboard_roll_speed",  text="Speed")
+                    roll_row.prop(ps, "billboard_roll_random", text="Random")
 
             # Collision section
             box.separator()
@@ -2036,6 +2263,10 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.prop(ps, "turbulence_frequency", text="Frequency")
                 box.prop(ps, "turbulence_speed",     text="Speed")
                 box.prop(ps, "turbulence_seed",      text="Seed")
+                box.separator()
+                box.prop(ps, "turbulence_influence",        text="Position Amount", slider=True)
+                box.prop(ps, "turbulence_rotation_strength", text="Rotation Amount")
+                box.prop(ps, "turbulence_scale_strength",    text="Size Amount")
 
             # Sub-Emitter section
             box = layout.box()
@@ -2901,7 +3132,7 @@ _radians = math.radians
 _atan2  = math.atan2
 
 class Particle:
-    __slots__ = ('position', 'velocity', 'age', 'lifetime', 'size',
+    __slots__ = ('position', 'velocity', 'spawn_velocity', 'physics_velocity', 'age', 'lifetime', 'size',
                  'obj', 'rotation', 'angular_velocity', 'local_offset', 'is_active',
                  'pool_idx',
                  'orbit_angle', 'orbit_speed', 'orbit_radius',
@@ -2911,6 +3142,8 @@ class Particle:
     def __init__(self):
         self.position        = Vector((0.0, 0.0, 0.0))
         self.velocity        = Vector((0.0, 0.0, 0.0))
+        self.spawn_velocity  = Vector((0.0, 0.0, 0.0))
+        self.physics_velocity = Vector((0.0, 0.0, 0.0))
         self.age             = 0.0
         self.lifetime        = 1.0
         self.size            = 0.1
@@ -2951,6 +3184,7 @@ class ParticleSystem:
         '_rot_has_value', '_rot_rad',
         # Turbulence
         '_turb_enabled', '_turb_strength', '_turb_frequency', '_turb_speed', '_turb_time', '_turb_seed',
+        '_turb_influence', '_turb_rot_strength', '_turb_scale_strength',
         # LOD
         '_lod_enabled', '_lod_level', '_lod_start', '_lod_table', '_lod_levels_count',
         # System Launcher
@@ -2965,6 +3199,12 @@ class ParticleSystem:
         '_orbit_basis_u', '_orbit_basis_v',   # cached basis vectors for ORBIT mode
         # Billboard Roll
         '_bb_roll_enabled', '_bb_roll_speed', '_bb_roll_random',
+        # Velocity / Force Over-Lifetime curves (each is a (list_x, list_y, list_z) tuple or None)
+        '_vel_mode', '_vel_curve',
+        '_force_mode', '_force_curve',
+        '_acc_base',        # Vector — full acc per-sec (force+gravity) without dt
+        '_force_only_acc',  # Vector — user force only (no gravity); for per-particle force curve
+        '_grav_acc',        # Vector — gravity-only * dt; added unconditionally in force-curve path
         # Billboard facing method: 'CAM_ROT' | 'LOOK_AT'
         '_bb_facing',
         # Sub-Emitter (on-death, on-birth, on-collision)
@@ -3030,7 +3270,10 @@ class ParticleSystem:
         self._color_curve     = None   # None = Simple linear; list of floats = Curve mode
         self._color_ramp      = None   # None = not Ramp mode; list of (pos,r,g,b,a) tuples
         self._turb_time       = 0.0  # Turbulence time accumulator
-        self._turb_seed       = 0    # Noise seed — offsets lookup coords per emitter
+        self._turb_seed          = 0
+        self._turb_influence     = 1.0
+        self._turb_rot_strength  = 0.0
+        self._turb_scale_strength= 0.0
         self._lod_level       = 0    # Current active LOD level (0 = full sim)
         self._lod_levels_count = 3   # How many LOD entries are active (1/2/3)
         # System Launcher
@@ -3052,6 +3295,14 @@ class ParticleSystem:
         self._orbit_basis_u      = Vector((1.0, 0.0, 0.0))
         self._orbit_basis_v      = Vector((0.0, 1.0, 0.0))
         self._first_frame        = True
+        # Velocity / Force Over-Lifetime curves
+        self._vel_mode   = 'CONSTANT'
+        self._vel_curve  = None
+        self._force_mode = 'CONSTANT'
+        self._force_curve= None
+        self._acc_base       = Vector((0.0, 0.0, 0.0))
+        self._force_only_acc = Vector((0.0, 0.0, 0.0))
+        self._grav_acc       = Vector((0.0, 0.0, 0.0))
         # Billboard Roll
         self._bb_roll_enabled    = False
         self._bb_roll_speed      = 0.3
@@ -3256,6 +3507,13 @@ class ParticleSystem:
             g('ps_sim_speed',                 1.0),        # 145 — simulation time multiplier
             g('ps_emission_mesh_object',      ' '),        # 146 — mesh object name for MESH shape
             g('ps_emission_mesh_mode',        'FACE'),     # 147 — FACE / VERTEX / BOTH
+            g('ps_velocity_mode',             'CONSTANT'), # 148
+            g('ps_velocity_curve',            '  '),       # 149 — baked XYZ velocity curve
+            g('ps_force_mode',                'CONSTANT'), # 150
+            g('ps_force_curve',               '  '),       # 151 — baked XYZ force curve
+            g('ps_turb_influence',            1.0),        # 152
+            g('ps_turb_rot_strength',         0.0),        # 153
+            g('ps_turb_scale_strength',       0.0),        # 154
         )
 
     def _build_props_from_raw(self, r):
@@ -3401,6 +3659,13 @@ class ParticleSystem:
             'trail_color_b':          r[139],
             'trail_alpha':            r[140],
             'trail_width':            r[141],
+            'velocity_mode':          r[148],
+            'velocity_curve':         r[149],
+            'force_mode':             r[150],
+            'force_curve':            r[151],
+            'turb_influence':         r[152],
+            'turb_rot_strength':      r[153],
+            'turb_scale_strength':    r[154],
         }
 
     def load_properties(self):
@@ -3456,11 +3721,17 @@ class ParticleSystem:
                 self._drag_start  = 0.0
                 self._drag_end    = 0.0
                 self._resistance  = 1.0
+            # Force is in the emitter's local space when _is_local is set —
+            # rotate it into world space before adding. Gravity is ALWAYS
+            # world-space global -Z regardless of emitter orientation, so it
+            # is never rotated.
             if self._is_local:
                 ori = self.emitter.worldOrientation
-                self._acc_per_sec = ori @ force_w + ori @ grav_w
+                self._force_only_acc = ori @ force_w
+                self._acc_per_sec    = self._force_only_acc + grav_w
             else:
-                self._acc_per_sec = force_w + grav_w
+                self._force_only_acc = force_w.copy()
+                self._acc_per_sec    = force_w + grav_w
             self._acc = self._acc_per_sec * dt
             # Pre-convert torque to radians/sec² — store per-sec so dt can be reapplied cheaply
             torq = p['torque']
@@ -3472,11 +3743,10 @@ class ParticleSystem:
             self._drag_start = 0.0
             self._drag_end   = 0.0
             self._resistance = 1.0
-            if self._is_local:
-                ori = self.emitter.worldOrientation
-                self._acc_per_sec = ori @ grav_w
-            else:
-                self._acc_per_sec = grav_w.copy()
+            # Simple mode has no user-defined force, only gravity.
+            # Gravity is always world-space global -Z — never rotated by emitter.
+            self._acc_per_sec    = grav_w.copy()
+            self._force_only_acc = Vector((0.0, 0.0, 0.0))  # no user force in Simple
             self._acc = self._acc_per_sec * dt
 
         # Pre-convert SIMPLE rotation speed to rad/frame-unit (divided by lifetime
@@ -3524,11 +3794,14 @@ class ParticleSystem:
             self._alpha_t_end    = max(p['alpha_end_time'] / 10.0, self._alpha_t_start + 0.0001)
 
         # Turbulence settings
-        self._turb_enabled   = p['enable_turbulence']
-        self._turb_strength  = p['turb_strength']
-        self._turb_frequency = p['turb_frequency']
-        self._turb_speed     = p['turb_speed']
-        self._turb_seed      = p.get('turb_seed', 0)
+        self._turb_enabled       = p['enable_turbulence']
+        self._turb_strength      = p['turb_strength']
+        self._turb_frequency     = p['turb_frequency']
+        self._turb_speed         = p['turb_speed']
+        self._turb_seed          = p.get('turb_seed', 0)
+        self._turb_influence     = float(p.get('turb_influence',      1.0))
+        self._turb_rot_strength  = float(p.get('turb_rot_strength',   0.0))
+        self._turb_scale_strength= float(p.get('turb_scale_strength', 0.0))
 
         # LOD settings — cache the full table once per props change
         self._lod_enabled  = p['enable_lod']
@@ -3603,6 +3876,18 @@ class ParticleSystem:
         self._orbit_radius_random   = p['orbit_radius_random']
         self._orbit_speed_val       = p['orbit_speed']
         self._orbit_speed_random    = p['orbit_speed_random']
+
+        # Velocity / Force Over-Lifetime curves
+        self._vel_mode  = p.get('velocity_mode', 'CONSTANT')
+        self._force_mode= p.get('force_mode',    'CONSTANT')
+        self._vel_curve  = ParticleSystem._parse_xyz_curve(p.get('velocity_curve', '  '))
+        self._force_curve= ParticleSystem._parse_xyz_curve(p.get('force_curve',    '  '))
+        # _acc_base = full acc per second (force+gravity), no dt — kept for reference
+        self._acc_base   = self._acc_per_sec.copy()
+        # _grav_acc = gravity-only * dt — used in force-curve path so gravity stays
+        # unconditional even when force is being scaled per-axis by the curve
+        self._grav_acc   = Vector((0.0, 0.0, grav_z * dt))
+        # _force_only_acc is already set correctly in the is_force/else branches above
 
         # Billboard Roll — precompute once per props change
         self._bb_roll_enabled = p['bb_roll_enabled']
@@ -3692,6 +3977,41 @@ class ParticleSystem:
             return [float(v) for v in raw.split(',')]
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_xyz_curve(raw):
+        # Parse pipe-separated XYZ curve string 'x0,x1,...|y0,y1,...|z0,z1,...'
+        # Returns (list_x, list_y, list_z) or None if blank/invalid.
+        if raw is None:
+            return None
+        raw = str(raw)
+        if not raw.strip():
+            return None
+        try:
+            parts = raw.split('|')
+            if len(parts) != 3:
+                return None
+            channels = [[float(v) for v in ch.split(',')] for ch in parts]
+            if any(len(ch) < 2 for ch in channels):
+                return None
+            return (channels[0], channels[1], channels[2])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _sample_xyz(curve_xyz, t):
+        # Sample (list_x, list_y, list_z) at normalised t (0-1).
+        # Returns (mx, my, mz) multipliers; falls back to (1,1,1) on error.
+        if curve_xyz is None:
+            return 1.0, 1.0, 1.0
+        result = []
+        for ch in curve_xyz:
+            n1  = len(ch) - 1
+            idx = t * n1
+            lo  = int(idx)
+            hi  = min(lo + 1, n1)
+            result.append(ch[lo] + (ch[hi] - ch[lo]) * (idx - lo))
+        return result[0], result[1], result[2]
 
     @staticmethod
     def _parse_ramp(raw):
@@ -4052,6 +4372,9 @@ class ParticleSystem:
         # Reset particle state
         p.position.x = spawn_pos.x; p.position.y = spawn_pos.y; p.position.z = spawn_pos.z
         p.velocity.x = spawn_vel.x; p.velocity.y = spawn_vel.y; p.velocity.z = spawn_vel.z
+        # Store spawn velocity so velocity curve can restore it as a reference each frame
+        p.spawn_velocity.x = spawn_vel.x; p.spawn_velocity.y = spawn_vel.y; p.spawn_velocity.z = spawn_vel.z
+        p.physics_velocity.x = 0.0; p.physics_velocity.y = 0.0; p.physics_velocity.z = 0.0
         p.local_offset.x = spawn_local_offset.x
         p.local_offset.y = spawn_local_offset.y
         p.local_offset.z = spawn_local_offset.z
@@ -4379,6 +4702,14 @@ class ParticleSystem:
 
         # --- Particle update loop (hot path) ---
         acc              = self._acc
+        grav_acc         = self._grav_acc  # gravity-only acc with dt — for force curve path
+        vel_mode         = self._vel_mode
+        vel_curve        = self._vel_curve
+        force_mode       = self._force_mode
+        force_curve      = self._force_curve
+        acc_base         = self._acc_base
+        force_only_acc   = self._force_only_acc  # user force only, no gravity — for force curve
+        _sample_xyz      = ParticleSystem._sample_xyz
         is_force         = self._is_force
         enable_collision  = self._enable_collision and not lod_no_coll
         bounce            = self._bounce
@@ -4424,6 +4755,9 @@ class ParticleSystem:
         turb_freq      = self._turb_frequency
         turb_time      = self._turb_time
         turb_seed_off  = self._turb_seed * 127.1  # float offset that uniquely shifts the noise field
+        turb_influence     = self._turb_influence
+        turb_rot_strength  = self._turb_rot_strength
+        turb_scale_strength= self._turb_scale_strength
         _noise         = ParticleSystem._value_noise3_seeded
 
         # Orbit locals — hoisted outside loop for zero attribute lookup per particle
@@ -4471,11 +4805,45 @@ class ParticleSystem:
                 self.deactivate_particle(p)
                 continue
 
+            # Velocity Over Lifetime — combine curve-controlled spawn contribution
+            # with separately-tracked physics (gravity/force) accumulation.
+            # p.physics_velocity is updated in the force/gravity block below and
+            # accumulates across frames; p.velocity is rebuilt from it each frame.
+            if vel_mode == 'OVER_LIFETIME' and vel_curve is not None:
+                life_ratio_vel = p.age / p.lifetime
+                mx, my, mz = _sample_xyz(vel_curve, life_ratio_vel)
+                # Curve directly controls spawn fraction; physics added on top.
+                # Immediate: changing the curve point snaps velocity that frame.
+                p.velocity.x = p.spawn_velocity.x * mx + p.physics_velocity.x
+                p.velocity.y = p.spawn_velocity.y * my + p.physics_velocity.y
+                p.velocity.z = p.spawn_velocity.z * mz + p.physics_velocity.z
+
             # Apply acceleration (gravity + optional force).
             # For orbit mode we skip this — orbit overwrites position directly.
             # Gravity drift along the free axis is handled inside the orbit branch.
             if not is_orbit:
-                p.velocity += acc
+                if force_mode == 'OVER_LIFETIME' and force_curve is not None:
+                    # Force curve: scale user-defined force per-axis, gravity unconditional.
+                    lrv = p.age / p.lifetime
+                    fx, fy, fz = _sample_xyz(force_curve, lrv)
+                    if vel_mode == 'OVER_LIFETIME' and vel_curve is not None:
+                        # Velocity curve active: accumulate physics separately
+                        p.physics_velocity.x += force_only_acc.x * fx * dt + grav_acc.x
+                        p.physics_velocity.y += force_only_acc.y * fy * dt + grav_acc.y
+                        p.physics_velocity.z += force_only_acc.z * fz * dt + grav_acc.z
+                    else:
+                        p.velocity.x += force_only_acc.x * fx * dt
+                        p.velocity.y += force_only_acc.y * fy * dt
+                        p.velocity.z += force_only_acc.z * fz * dt
+                        p.velocity += grav_acc
+                else:
+                    if vel_mode == 'OVER_LIFETIME' and vel_curve is not None:
+                        # Constant force, velocity curve active: accumulate physics separately
+                        p.physics_velocity.x += acc.x
+                        p.physics_velocity.y += acc.y
+                        p.physics_velocity.z += acc.z
+                    else:
+                        p.velocity += acc
 
             # Drag over lifetime — interpolates Start→End across particle age
             if drag_active:
@@ -4483,13 +4851,34 @@ class ParticleSystem:
                 p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
 
             # Turbulence — sample noise at particle world position
-                if turb_enabled:
-                    px = p.position.x * turb_freq
-                    py = p.position.y * turb_freq
-                    pz = p.position.z * turb_freq
-                    p.velocity.x += _noise(px,        py,        pz        + turb_time, turb_seed_off) * turb_strength * dt
-                    p.velocity.y += _noise(px + 31.7, py,        pz        + turb_time, turb_seed_off) * turb_strength * dt
-                    p.velocity.z += _noise(px,        py + 57.3, pz        + turb_time, turb_seed_off) * turb_strength * dt
+            if turb_enabled:
+                px = p.position.x * turb_freq
+                py = p.position.y * turb_freq
+                pz = p.position.z * turb_freq
+                # Raw noise displacement for this particle this frame
+                nx = _noise(px,        py,        pz + turb_time, turb_seed_off) * turb_strength
+                ny = _noise(px + 31.7, py,        pz + turb_time, turb_seed_off) * turb_strength
+                nz = _noise(px,        py + 57.3, pz + turb_time, turb_seed_off) * turb_strength
+                # Position influence — blend turbulence push with natural velocity.
+                # influence=1.0: full turbulence (original behaviour)
+                # influence=0.5: half-strength blend
+                # influence=0.0: no positional effect
+                p.velocity.x += nx * turb_influence * dt
+                p.velocity.y += ny * turb_influence * dt
+                p.velocity.z += nz * turb_influence * dt
+                # Rotation amount — noise drives angular velocity when non-zero
+                if turb_rot_strength > 0.0:
+                    # Use a differently-offset noise sample so rotation is independent of position
+                    rn = _noise(px + 13.1, py + 7.3, pz + turb_time + 5.0, turb_seed_off)
+                    p.roll_speed += rn * turb_rot_strength * dt
+                # Size amount — noise modulates size when non-zero
+                if turb_scale_strength > 0.0 and p.obj:
+                    sn = _noise(px + 47.9, py + 23.1, pz + turb_time + 11.0, turb_seed_off)
+                    # sn is -1..1; scale_strength controls the range of fluctuation
+                    cur_s = p.obj.worldScale[0]
+                    delta_s = sn * turb_scale_strength * dt
+                    new_s = max(0.001, cur_s + delta_s)
+                    p.obj.worldScale = [new_s, new_s, new_s]
 
             # Capture position BEFORE integration so the ray spans exactly
             # the segment the particle travels this frame (fixes one-frame-late
@@ -4516,7 +4905,25 @@ class ParticleSystem:
                 # Gravity/force drift: p.velocity accumulates as a drift vector
                 # (zeroed at spawn so it starts clean). acc already has dt baked in
                 # (_acc = _acc_per_sec * dt), so this is correct Euler: v += a*dt, pos += v*dt.
-                p.velocity += acc
+                if force_mode == 'OVER_LIFETIME' and force_curve is not None:
+                    lrv = p.age / p.lifetime
+                    fx, fy, fz = _sample_xyz(force_curve, lrv)
+                    if vel_mode == 'OVER_LIFETIME' and vel_curve is not None:
+                        p.physics_velocity.x += force_only_acc.x * fx * dt + grav_acc.x
+                        p.physics_velocity.y += force_only_acc.y * fy * dt + grav_acc.y
+                        p.physics_velocity.z += force_only_acc.z * fz * dt + grav_acc.z
+                    else:
+                        p.velocity.x += force_only_acc.x * fx * dt
+                        p.velocity.y += force_only_acc.y * fy * dt
+                        p.velocity.z += force_only_acc.z * fz * dt
+                        p.velocity += grav_acc
+                else:
+                    if vel_mode == 'OVER_LIFETIME' and vel_curve is not None:
+                        p.physics_velocity.x += acc.x
+                        p.physics_velocity.y += acc.y
+                        p.physics_velocity.z += acc.z
+                    else:
+                        p.velocity += acc
                 p.position.x += p.velocity.x * dt
                 p.position.y += p.velocity.y * dt
                 p.position.z += p.velocity.z * dt
@@ -4909,6 +5316,14 @@ init()
         ensure_prop('ps_drag_end',     'FLOAT', props.drag_end)
         ensure_prop('ps_resistance',   'FLOAT', props.resistance_strength)
 
+        # Velocity / Force curves — bake live curve data so the runtime has it
+        # even when Apply Material hasn't been run manually.
+        ensure_prop('ps_velocity_mode',  'STRING', props.velocity_mode)
+        _vel_curve_str = sample_velocity_curve(init_obj.name) if props.velocity_mode == 'OVER_LIFETIME' else '  '
+        ensure_prop('ps_velocity_curve', 'STRING', _vel_curve_str)
+        ensure_prop('ps_force_mode',     'STRING', props.force_mode)
+        _frc_curve_str = sample_force_curve(init_obj.name) if props.force_mode == 'OVER_LIFETIME' else '  '
+        ensure_prop('ps_force_curve',    'STRING', _frc_curve_str)
         # Billboard Roll
         ensure_prop('ps_bb_roll_enabled', 'BOOL',  props.billboard_roll_enabled)
         ensure_prop('ps_bb_roll_speed',   'FLOAT', props.billboard_roll_speed)
@@ -4957,11 +5372,14 @@ init()
         ensure_prop('ps_alpha_end_time',   'FLOAT', props.alpha_end_time)
 
         # Turbulence
-        ensure_prop('ps_enable_turb',      'BOOL',  props.enable_turbulence)
-        ensure_prop('ps_turb_strength',    'FLOAT', props.turbulence_strength)
-        ensure_prop('ps_turb_frequency',   'FLOAT', props.turbulence_frequency)
-        ensure_prop('ps_turb_speed',       'FLOAT', props.turbulence_speed)
-        ensure_prop('ps_turb_seed',        'INT',   props.turbulence_seed)
+        ensure_prop('ps_enable_turb',        'BOOL',  props.enable_turbulence)
+        ensure_prop('ps_turb_strength',      'FLOAT', props.turbulence_strength)
+        ensure_prop('ps_turb_frequency',     'FLOAT', props.turbulence_frequency)
+        ensure_prop('ps_turb_speed',         'FLOAT', props.turbulence_speed)
+        ensure_prop('ps_turb_seed',          'INT',   props.turbulence_seed)
+        ensure_prop('ps_turb_influence',     'FLOAT', props.turbulence_influence)
+        ensure_prop('ps_turb_rot_strength',  'FLOAT', props.turbulence_rotation_strength)
+        ensure_prop('ps_turb_scale_strength','FLOAT', props.turbulence_scale_strength)
 
         # LOD
         ensure_prop('ps_enable_lod',      'BOOL',  props.enable_lod)
@@ -5263,6 +5681,22 @@ class PARTICLE_OT_apply_material(bpy.types.Operator):
                 obj.game.properties['ps_alpha_curve'].value = curve_str
         elif 'ps_alpha_curve' in obj.game.properties:
             obj.game.properties['ps_alpha_curve'].value = '  '
+
+        # Velocity curve — bake XYZ channels when mode is Over Lifetime
+        if ps.velocity_mode == 'OVER_LIFETIME':
+            curve_str = sample_velocity_curve(obj.name, n=16)
+            if 'ps_velocity_curve' in obj.game.properties:
+                obj.game.properties['ps_velocity_curve'].value = curve_str
+        elif 'ps_velocity_curve' in obj.game.properties:
+            obj.game.properties['ps_velocity_curve'].value = '  '
+
+        # Force curve — bake XYZ channels when mode is Over Lifetime
+        if ps.force_mode == 'OVER_LIFETIME':
+            curve_str = sample_force_curve(obj.name, n=16)
+            if 'ps_force_curve' in obj.game.properties:
+                obj.game.properties['ps_force_curve'].value = curve_str
+        elif 'ps_force_curve' in obj.game.properties:
+            obj.game.properties['ps_force_curve'].value = '  '
 
         self.report({'INFO'}, f"Material '{mat_name}' applied to '{target.name}'")
         return {'FINISHED'}
@@ -5648,6 +6082,8 @@ classes = (
     PARTICLE_OT_init_color_curve,
     PARTICLE_OT_init_alpha_curve,
     PARTICLE_OT_init_size_curve,
+    PARTICLE_OT_init_velocity_curve,
+    PARTICLE_OT_init_force_curve,
     PARTICLE_OT_init_color_ramp,
     PARTICLE_OT_remove_script,
     PARTICLE_OT_remove_props,
@@ -5662,11 +6098,18 @@ def register():
     # Auto-delete wire visualizers when their emitter is deleted
     if _cleanup_orphaned_wires not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_cleanup_orphaned_wires)
+    # Re-subscribe XYZ curve msgbus on every file load (subscriptions don't persist)
+    if _resubscribe_all_xyz_curves not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_resubscribe_all_xyz_curves)
+    # Note: no eager call here — bpy.data is restricted during register()
 
 def unregister():
     # Remove the depsgraph handler first so it can't fire during cleanup
     if _cleanup_orphaned_wires in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_cleanup_orphaned_wires)
+    if _resubscribe_all_xyz_curves in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_resubscribe_all_xyz_curves)
+    bpy.msgbus.clear_by_owner(_xyz_msgbus_owner)
 
     # Clean up all PS wire objects from all objects in all scenes
     for obj in list(bpy.data.objects):
