@@ -583,6 +583,142 @@ def _ensure_curve_mat(obj):
     mat.use_fake_user = True
     return mat
 
+def _serialize_curve_node(node):
+    """Serialize a ShaderNodeRGBCurve to a plain dict (all 4 channels + mapping settings)."""
+    if node is None:
+        return None
+    mapping = node.mapping
+    channels = []
+    for curve in mapping.curves:          # indices 0=R, 1=G, 2=B, 3=Combined
+        pts = []
+        for pt in curve.points:
+            pts.append({
+                'loc':    [pt.location[0], pt.location[1]],
+                'handle': pt.handle_type,
+            })
+        channels.append(pts)
+    return {
+        'label':       node.label,
+        'use_clip':    mapping.use_clip,
+        'clip_min_x':  mapping.clip_min_x,
+        'clip_max_x':  mapping.clip_max_x,
+        'clip_min_y':  mapping.clip_min_y,
+        'clip_max_y':  mapping.clip_max_y,
+        'channels':    channels,
+    }
+
+
+def _restore_curve_node(node, data):
+    """Restore a ShaderNodeRGBCurve from a dict produced by _serialize_curve_node."""
+    if node is None or data is None:
+        return
+    mapping = node.mapping
+    mapping.use_clip   = data.get('use_clip', True)
+    mapping.clip_min_x = data.get('clip_min_x', 0.0)
+    mapping.clip_max_x = data.get('clip_max_x', 1.0)
+    mapping.clip_min_y = data.get('clip_min_y', 0.0)
+    mapping.clip_max_y = data.get('clip_max_y', 1.0)
+    for ch_idx, pts_data in enumerate(data.get('channels', [])):
+        if ch_idx >= len(mapping.curves):
+            break
+        curve = mapping.curves[ch_idx]
+        # Add missing points first (Blender curves always start with 2)
+        while len(curve.points) < len(pts_data):
+            # Insert at a neutral position — will be overwritten immediately
+            curve.points.new(0.5, 0.5)
+        for pt_idx, pt_data in enumerate(pts_data):
+            if pt_idx >= len(curve.points):
+                break
+            curve.points[pt_idx].location    = pt_data['loc']
+            curve.points[pt_idx].handle_type = pt_data['handle']
+    mapping.update()
+
+
+def _serialize_color_ramp(node):
+    """Serialize a ShaderNodeValToRGB (color ramp) to a plain dict."""
+    if node is None:
+        return None
+    ramp = node.color_ramp
+    elements = []
+    for el in ramp.elements:
+        elements.append({
+            'pos':   el.position,
+            'color': list(el.color),
+        })
+    return {
+        'interpolation': ramp.interpolation,
+        'color_mode':    ramp.color_mode,
+        'elements':      elements,
+    }
+
+
+def _restore_color_ramp(node, data):
+    """Restore a ShaderNodeValToRGB from a dict produced by _serialize_color_ramp."""
+    if node is None or data is None:
+        return
+    ramp = node.color_ramp
+    ramp.interpolation = data.get('interpolation', 'LINEAR')
+    ramp.color_mode    = data.get('color_mode', 'RGB')
+    elements_data = data.get('elements', [])
+    if not elements_data:
+        return
+    # Blender ramps always have at least 2 elements; add extras then set all
+    while len(ramp.elements) < len(elements_data):
+        ramp.elements.new(0.5)
+    # Remove excess elements from the end (can't remove below 2)
+    while len(ramp.elements) > max(len(elements_data), 2):
+        ramp.elements.remove(ramp.elements[-1])
+    for i, el_data in enumerate(elements_data):
+        if i >= len(ramp.elements):
+            break
+        ramp.elements[i].position = el_data['pos']
+        ramp.elements[i].color    = el_data['color']
+
+
+def _serialize_curves_for_obj(obj_name):
+    """Collect and serialize all curve nodes and the color ramp for one emitter.
+    Returns a dict ready to embed in the .pse entry, or {} if no curve mat exists."""
+    mat = bpy.data.materials.get(CURVE_MAT_PREFIX + obj_name)
+    if mat is None or not mat.use_nodes:
+        return {}
+    result = {}
+    curve_labels = ('ColorCurve', 'AlphaCurve', 'SizeCurve', 'VelocityCurve', 'ForceCurve')
+    for label in curve_labels:
+        node = _get_curve_node(obj_name, label)
+        if node is not None:
+            result[label] = _serialize_curve_node(node)
+    ramp_node = get_color_ramp_node(obj_name)
+    if ramp_node is not None:
+        result['ColorRamp'] = _serialize_color_ramp(ramp_node)
+    return result
+
+
+def _restore_curves_for_obj(obj, curves_data):
+    """Reconstruct all curve nodes and the color ramp for one emitter from serialized data."""
+    if not curves_data:
+        return
+    mat = _ensure_curve_mat(obj)
+    signed_labels = {'VelocityCurve', 'ForceCurve'}
+    curve_labels  = ('ColorCurve', 'AlphaCurve', 'SizeCurve', 'VelocityCurve', 'ForceCurve')
+    for label in curve_labels:
+        node_data = curves_data.get(label)
+        if node_data is None:
+            continue
+        node = _get_curve_node(obj.name, label)
+        if node is None:
+            node = _make_curve_node(mat, label, signed=(label in signed_labels))
+        _restore_curve_node(node, node_data)
+    # Color ramp
+    ramp_data = curves_data.get('ColorRamp')
+    if ramp_data is not None:
+        ramp_node = get_color_ramp_node(obj.name)
+        if ramp_node is None:
+            # Recreate the ramp node the same way init_color_ramp does
+            ramp_node      = mat.node_tree.nodes.new('ShaderNodeValToRGB')
+            ramp_node.label = 'ColorRamp'
+        _restore_color_ramp(ramp_node, ramp_data)
+
+
 def _make_curve_node(mat, label, signed=False):
     """Create a ShaderNodeRGBCurve with default diagonal and AUTO_CLAMPED handles.
     signed=True: Y range is -1..2 so the curve can go negative (direction reversal).
@@ -1503,25 +1639,25 @@ class ParticleSystemProperties(bpy.types.PropertyGroup):
 
     turbulence_influence: bpy.props.FloatProperty(
         name="Position Amount",
-        description="How much the noise field displaces particle positions each frame — "
-                    "0 leaves movement untouched, 1 applies full turbulence push",
+        description="Multiplier for how much the noise field affects particle positions — "
+                    "0 removes all positional noise, 1 applies full effect",
         default=1.0, min=0.0, max=1.0,
         update=update_game_prop
     )
 
     turbulence_rotation_strength: bpy.props.FloatProperty(
         name="Rotation Amount",
-        description="How strongly the noise field drives particle angular velocity — "
-                    "0 disables rotational noise entirely",
-        default=0.0, min=0.0, max=100.0,
+        description="Multiplier for how much the noise field spins particles, in degrees per second — "
+                    "0 removes all rotational noise",
+        default=0.0, min=0.0, max=360.0,
         update=update_game_prop
     )
 
     turbulence_scale_strength: bpy.props.FloatProperty(
         name="Size Amount",
-        description="How much the noise field fluctuates particle size each frame — "
-                    "0 disables size noise entirely",
-        default=0.0, min=0.0, max=10.0,
+        description="Multiplier for how much the noise field scales particle size — "
+                    "0 removes all size noise",
+        default=0.0, min=0.0, max=1.0,
         update=update_game_prop
     )
 
@@ -2266,7 +2402,7 @@ class PARTICLE_PT_upbge_panel(bpy.types.Panel):
                 box.separator()
                 box.prop(ps, "turbulence_influence",        text="Position Amount", slider=True)
                 box.prop(ps, "turbulence_rotation_strength", text="Rotation Amount")
-                box.prop(ps, "turbulence_scale_strength",    text="Size Amount")
+                box.prop(ps, "turbulence_scale_strength",    text="Size Amount", slider=True)
 
             # Sub-Emitter section
             box = layout.box()
@@ -4850,34 +4986,29 @@ class ParticleSystem:
                 life_r = p.age / p.lifetime
                 p.velocity *= 1.0 - (drag_start + (drag_end - drag_start) * life_r) * resistance * dt
 
-            # Turbulence — sample noise at particle world position
+            # Turbulence — sample noise field, apply scaled to position / rotation / size
             if turb_enabled:
                 px = p.position.x * turb_freq
                 py = p.position.y * turb_freq
                 pz = p.position.z * turb_freq
-                # Raw noise displacement for this particle this frame
+                # Three orthogonal noise channels scaled by global strength
                 nx = _noise(px,        py,        pz + turb_time, turb_seed_off) * turb_strength
                 ny = _noise(px + 31.7, py,        pz + turb_time, turb_seed_off) * turb_strength
                 nz = _noise(px,        py + 57.3, pz + turb_time, turb_seed_off) * turb_strength
-                # Position influence — blend turbulence push with natural velocity.
-                # influence=1.0: full turbulence (original behaviour)
-                # influence=0.5: half-strength blend
-                # influence=0.0: no positional effect
-                p.velocity.x += nx * turb_influence * dt
-                p.velocity.y += ny * turb_influence * dt
-                p.velocity.z += nz * turb_influence * dt
-                # Rotation amount — noise drives angular velocity when non-zero
+                # Position Amount — multiplier on how much noise displaces the particle
+                if turb_influence > 0.0:
+                    p.velocity.x += nx * turb_influence * dt
+                    p.velocity.y += ny * turb_influence * dt
+                    p.velocity.z += nz * turb_influence * dt
+                # Rotation Amount — noise drives spin rate in degrees/sec
                 if turb_rot_strength > 0.0:
-                    # Use a differently-offset noise sample so rotation is independent of position
                     rn = _noise(px + 13.1, py + 7.3, pz + turb_time + 5.0, turb_seed_off)
-                    p.roll_speed += rn * turb_rot_strength * dt
-                # Size amount — noise modulates size when non-zero
+                    p.roll_speed += rn * turb_rot_strength * _pi / 180.0 * dt
+                # Size Amount — noise scales particle size as a multiplier
                 if turb_scale_strength > 0.0 and p.obj:
                     sn = _noise(px + 47.9, py + 23.1, pz + turb_time + 11.0, turb_seed_off)
-                    # sn is -1..1; scale_strength controls the range of fluctuation
-                    cur_s = p.obj.worldScale[0]
-                    delta_s = sn * turb_scale_strength * dt
-                    new_s = max(0.001, cur_s + delta_s)
+                    cur_s = p.size
+                    new_s = max(0.001, cur_s * (1.0 + sn * turb_scale_strength))
                     p.obj.worldScale = [new_s, new_s, new_s]
 
             # Capture position BEFORE integration so the ray spans exactly
@@ -5809,6 +5940,121 @@ def _b64_to_image(name, b64_str):
         print(f"PSE: could not restore image '{name}': {e}")
         return None
 
+def _mesh_obj_to_dict(obj):
+    """Serialize a MESH object's geometry and materials to a plain dict.
+    Captures vertices, edges, polygons, UV layers, vertex colors, and any
+    image textures found in the object's material slots."""
+    mesh = obj.data
+    # Ensure mesh is in a clean evaluated state
+    mesh.calc_loop_triangles()
+
+    verts  = [list(v.co) for v in mesh.vertices]
+    edges  = [list(e.vertices) for e in mesh.edges]
+    polys  = [list(p.vertices) for p in mesh.polygons]
+
+    # UV layers — store per-loop uv for every layer
+    uv_layers = {}
+    for uv_layer in mesh.uv_layers:
+        uv_layers[uv_layer.name] = [list(d.uv) for d in uv_layer.data]
+
+    # Vertex color layers
+    vc_layers = {}
+    for vc_layer in mesh.vertex_colors:
+        vc_layers[vc_layer.name] = [list(d.color) for d in vc_layer.data]
+
+    # Materials — embed any image texture found in each material's node tree
+    materials = []
+    for slot in obj.material_slots:
+        mat = slot.material
+        if mat is None:
+            materials.append(None)
+            continue
+        mat_entry = {'name': mat.name, 'images': []}
+        if mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    b64 = _image_to_b64(node.image)
+                    if b64:
+                        mat_entry['images'].append({
+                            'name': node.image.name,
+                            'node': node.name,
+                            'b64':  b64,
+                        })
+        materials.append(mat_entry)
+
+    return {
+        'name':       obj.name,
+        'mesh_name':  mesh.name,
+        'verts':      verts,
+        'edges':      edges,
+        'polys':      polys,
+        'uv_layers':  uv_layers,
+        'vc_layers':  vc_layers,
+        'materials':  materials,
+    }
+
+
+def _dict_to_mesh_obj(entry, context):
+    """Reconstruct a MESH object from a serialized dict produced by _mesh_obj_to_dict.
+    Returns the new bpy.types.Object or None on failure."""
+    try:
+        mesh_name = entry.get('mesh_name', entry.get('name', 'PSMesh'))
+        obj_name  = entry.get('name', mesh_name)
+
+        # Reuse existing mesh/object if names already exist in this file
+        existing_obj = bpy.data.objects.get(obj_name)
+        if existing_obj and existing_obj.type == 'MESH':
+            return existing_obj
+
+        # Build mesh from raw geometry
+        mesh = bpy.data.meshes.new(mesh_name)
+        mesh.from_pydata(entry['verts'], entry['edges'], entry['polys'])
+        mesh.update()
+
+        # Restore UV layers
+        for layer_name, loop_uvs in entry.get('uv_layers', {}).items():
+            uv_layer = mesh.uv_layers.new(name=layer_name)
+            for i, uv in enumerate(loop_uvs):
+                if i < len(uv_layer.data):
+                    uv_layer.data[i].uv = uv
+
+        # Restore vertex color layers
+        for layer_name, loop_cols in entry.get('vc_layers', {}).items():
+            vc_layer = mesh.vertex_colors.new(name=layer_name)
+            for i, col in enumerate(loop_cols):
+                if i < len(vc_layer.data):
+                    vc_layer.data[i].color = col
+
+        # Create the object and link it to the scene collection
+        new_obj = bpy.data.objects.new(obj_name, mesh)
+        context.collection.objects.link(new_obj)
+
+        # Restore materials and their embedded images
+        for mat_entry in entry.get('materials', []):
+            if mat_entry is None:
+                new_obj.data.materials.append(None)
+                continue
+            mat_name = mat_entry.get('name', 'PSMat')
+            mat = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
+            mat.use_nodes = True
+            # Restore image texture nodes
+            for img_entry in mat_entry.get('images', []):
+                img = _b64_to_image(img_entry['name'], img_entry['b64'])
+                if img:
+                    node_name = img_entry.get('node')
+                    node = mat.node_tree.nodes.get(node_name)
+                    if node is None or node.type != 'TEX_IMAGE':
+                        node = mat.node_tree.nodes.new('ShaderNodeTexImage')
+                        node.name = node_name or img.name
+                    node.image = img
+            new_obj.data.materials.append(mat)
+
+        return new_obj
+    except Exception as e:
+        print(f"PSE: could not reconstruct mesh object '{entry.get('name')}': {e}")
+        return None
+
+
 def _collect_emitter_tree(root):
     """Return root + all child objects that are particle emitters,
     recursively. Order: root first, then children depth-first."""
@@ -5838,6 +6084,21 @@ def _serialize_emitter(obj, root, id_map):
         if ptr and ptr.name in id_map:
             data[field] = '__id__:' + id_map[ptr.name]
 
+    # Embed particle mesh geometry if assigned
+    mesh_data = None
+    mesh_obj  = getattr(ps, 'particle_mesh', None)
+    if mesh_obj and mesh_obj.type == 'MESH':
+        mesh_data = _mesh_obj_to_dict(mesh_obj)
+
+    # Embed emission mesh geometry if assigned (spawn-from-surface shape)
+    emission_mesh_data = None
+    emission_mesh_obj  = getattr(ps, 'emission_mesh_object', None)
+    if emission_mesh_obj and emission_mesh_obj.type == 'MESH':
+        emission_mesh_data = _mesh_obj_to_dict(emission_mesh_obj)
+
+    # Serialize all curve nodes and color ramp for this emitter
+    curves_data = _serialize_curves_for_obj(obj.name)
+
     # Embed texture as Base64 if assigned
     tex_b64  = None
     tex_name = None
@@ -5860,8 +6121,11 @@ def _serialize_emitter(obj, root, id_map):
         'is_root':     obj is root,
         'parent_id':   id_map.get(obj.parent.name) if obj.parent and obj.parent.name in id_map else None,
         'properties':  data,
-        'texture_name': tex_name,
-        'texture_b64':  tex_b64,
+        'texture_name':       tex_name,
+        'texture_b64':        tex_b64,
+        'mesh_data':          mesh_data,
+        'emission_mesh_data': emission_mesh_data,
+        'curves_data':        curves_data,
     }
 
 def _export_pse(root, filepath):
@@ -5921,11 +6185,36 @@ def _import_pse(filepath, context):
             if tex_obj is None:
                 warnings.append(f"Could not restore texture '{tex_name}' for '{obj.name}'")
 
+        # Reconstruct particle mesh from embedded geometry if present
+        mesh_obj = None
+        mesh_data = entry.get('mesh_data')
+        if mesh_data:
+            mesh_obj = _dict_to_mesh_obj(mesh_data, context)
+            if mesh_obj is None:
+                warnings.append(f"Could not reconstruct particle mesh for '{obj.name}'")
+
+        # Reconstruct emission mesh from embedded geometry if present
+        emission_mesh_obj  = None
+        emission_mesh_data = entry.get('emission_mesh_data')
+        if emission_mesh_data:
+            emission_mesh_obj = _dict_to_mesh_obj(emission_mesh_data, context)
+            if emission_mesh_obj is None:
+                warnings.append(f"Could not reconstruct emission mesh for '{obj.name}'")
+
         # Apply particle system properties
         ps = obj.particle_system_props
         _deserialize_props(ps, entry.get('properties', {}))
         if tex_obj:
             ps.billboard_texture = tex_obj
+        if mesh_obj:
+            ps.particle_mesh = mesh_obj
+        if emission_mesh_obj:
+            ps.emission_mesh_object = emission_mesh_obj
+
+        # Restore curve nodes and color ramp
+        curves_data = entry.get('curves_data', {})
+        if curves_data:
+            _restore_curves_for_obj(obj, curves_data)
 
         id_to_obj[stable_id] = obj
 
